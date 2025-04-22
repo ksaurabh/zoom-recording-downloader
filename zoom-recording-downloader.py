@@ -194,6 +194,7 @@ def format_filename(params):
     recording = params["recording"]
     recording_id = params["recording_id"]
     recording_type = params["recording_type"]
+    email=params["email"]	
 
     invalid_chars_pattern = r'[<>:"/\\|?*\x00-\x1F]'
     topic = regex.sub(invalid_chars_pattern, '', recording["topic"])
@@ -420,7 +421,8 @@ def main():
                         "file_extension": file_extension,
                         "recording": recording,
                         "recording_id": recording_id,
-                        "recording_type": recording_type
+                        "recording_type": recording_type,
+			"email": email
                     }
                     filename, folder_name = format_filename(params)
 
