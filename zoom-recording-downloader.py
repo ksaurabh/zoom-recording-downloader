@@ -19,6 +19,7 @@ import signal
 import sys as system
 import time
 from datetime import datetime, date, timezone, timedelta
+from urllib.parse import quote
 
 # Installed modules
 import dateutil.parser as parser
@@ -81,6 +82,8 @@ RECORDING_START_DATE = parser.parse(config("Recordings", "start_date", f"{RECORD
 RECORDING_END_DATE = parser.parse(config("Recordings", "end_date", str(date.today()))).replace(tzinfo=timezone.utc)
 DOWNLOAD_DIRECTORY = config("Storage", "download_dir", 'downloads')
 COMPLETED_MEETING_IDS_LOG = config("Storage", "completed_log", 'completed-downloads.log')
+USAGE_CACHE_FILE = config("Storage", "usage_cache", 'usage-cache.json')
+ARCHIVE_SETTINGS_FILE = config("Storage", "archive_settings", 'archive-settings.json')
 COMPLETED_MEETING_IDS = set()
 
 MEETING_TIMEZONE = ZoneInfo(config("Recordings", "timezone", 'UTC'))
@@ -253,14 +256,18 @@ def per_delta(start, end, delta):
         curr += delta
 
 
-def list_recordings(email):
+def list_recordings(email, rec_start_date=None, rec_end_date=None):
     """ Start date now split into YEAR, MONTH, and DAY variables (Within 6 month range)
-        then get recordings within that range
+        then get recordings within that range. Defaults to the globally configured
+        range, but an explicit start/end may be passed (used by the monthly report).
     """
-    
+
+    rec_start_date = rec_start_date or RECORDING_START_DATE
+    rec_end_date = rec_end_date or RECORDING_END_DATE
+
     recordings = []
 
-    for start, end in per_delta(RECORDING_START_DATE, RECORDING_END_DATE, timedelta(days=30)):
+    for start, end in per_delta(rec_start_date, rec_end_date, timedelta(days=30)):
         post_data = get_recordings(email, 300, start, end)
         response = requests.get(
             url=f"https://api.zoom.us/v2/users/{email}/recordings",
@@ -308,6 +315,676 @@ def download_recording(download_url, email, filename, folder_name):
         )
 
         return False
+
+
+def format_bytes(size):
+    """ Convert a number of bytes into a human readable string """
+    size = float(size or 0)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024.0 or unit == "TB":
+            return f"{size:.2f} {unit}"
+        size /= 1024.0
+
+
+def prompt_date_range():
+    """ Show the configured date range and let the user optionally change it.
+        Updates the global RECORDING_START_DATE / RECORDING_END_DATE.
+    """
+    global RECORDING_START_DATE, RECORDING_END_DATE
+
+    print(
+        f"\n{Color.BOLD}Current date range:{Color.END} "
+        f"{RECORDING_START_DATE.date()} to {RECORDING_END_DATE.date()}"
+    )
+    if input("Would you like to change it? (y/n): ").strip().lower() != "y":
+        return
+
+    while True:
+        start_input = input("Enter start date (YYYY-MM-DD): ").strip()
+        end_input = input("Enter end date (YYYY-MM-DD): ").strip()
+        try:
+            start = parser.parse(start_input).replace(tzinfo=timezone.utc)
+            end = parser.parse(end_input).replace(tzinfo=timezone.utc)
+        except (ValueError, OverflowError):
+            print(f"{Color.RED}### Invalid date format. Please use YYYY-MM-DD.{Color.END}")
+            continue
+
+        if start > end:
+            print(f"{Color.RED}### Start date must not be after end date.{Color.END}")
+            continue
+
+        RECORDING_START_DATE = start
+        RECORDING_END_DATE = end
+        return
+
+
+def compute_usage(users, start_date, end_date, quiet=False):
+    """ Sum cloud recording storage per user within the given date range.
+        Returns a dict with sorted per-user rows and the overall totals.
+        When quiet is set, the per-user progress lines are suppressed (useful
+        when computing many ranges, e.g. the archive history build).
+    """
+    report = []
+    total_size = 0
+    total_count = 0
+
+    for email, user_id, first_name, last_name in users:
+        user_info = (
+            f"{first_name} {last_name} - {email}" if first_name and last_name else f"{email}"
+        )
+        if not quiet:
+            print(f"==> Checking {user_info}")
+
+        recordings = list_recordings(user_id, start_date, end_date)
+        user_size = sum(int(rec.get("total_size", 0) or 0) for rec in recordings)
+        user_count = sum(int(rec.get("recording_count", 0) or 0) for rec in recordings)
+
+        report.append([email, len(recordings), user_count, user_size])
+        total_size += user_size
+        total_count += len(recordings)
+
+    # sort by storage used, largest first
+    report.sort(key=lambda row: row[3], reverse=True)
+
+    return {"report": report, "total_size": total_size, "total_count": total_count}
+
+
+def print_usage_table(result):
+    """ Print a usage report produced by compute_usage() (or read from cache). """
+    print(f"\n{Color.BOLD}{'Email':<40}{'Meetings':>10}{'Files':>8}{'Storage':>14}{Color.END}")
+    print("-" * 72)
+    for email, meetings, files, size in result["report"]:
+        print(f"{email:<40}{meetings:>10}{files:>8}{format_bytes(size):>14}")
+    print("-" * 72)
+    print(
+        f"{Color.BOLD}{'TOTAL':<40}{result['total_count']:>10}{'':>8}"
+        f"{format_bytes(result['total_size']):>14}{Color.END}"
+    )
+
+
+def report_cloud_usage():
+    """ Loop through all users and report how much cloud recording storage
+        each account is using within the configured date range.
+    """
+    prompt_date_range()
+
+    print(f"{Color.BOLD}Getting user accounts...{Color.END}")
+    users = get_users()
+
+    print(
+        f"\n{Color.BOLD}Cloud recording usage from "
+        f"{RECORDING_START_DATE.date()} to {RECORDING_END_DATE.date()}{Color.END}\n"
+    )
+
+    result = compute_usage(users, RECORDING_START_DATE, RECORDING_END_DATE)
+    print_usage_table(result)
+
+
+def load_usage_cache():
+    try:
+        with open(USAGE_CACHE_FILE, "r", encoding="utf-8") as fd:
+            return json.load(fd)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def save_usage_cache(cache):
+    with open(USAGE_CACHE_FILE, "w", encoding="utf-8") as fd:
+        json.dump(cache, fd, indent=2)
+
+
+def month_range(year, month):
+    """ Return (start, end) UTC datetimes spanning the given calendar month. """
+    start = datetime(year, month, 1, tzinfo=timezone.utc)
+    if month == 12:
+        end = datetime(year + 1, 1, 1, tzinfo=timezone.utc) - timedelta(days=1)
+    else:
+        end = datetime(year, month + 1, 1, tzinfo=timezone.utc) - timedelta(days=1)
+    return start, end
+
+
+def get_month_usage(users_getter, year, month, cache, quiet=False):
+    """ Return (result, from_cache) for a calendar month's usage.
+        Completed months are served from / written to the cache; the current
+        (in-progress) month is always recomputed live since it keeps changing.
+        users_getter is called only on a cache miss, so cached-only runs avoid
+        fetching the user list.
+    """
+    key = f"{year:04d}-{month:02d}"
+    current_key = datetime.now(timezone.utc).strftime("%Y-%m")
+    is_current = (key == current_key)
+
+    if key in cache and not is_current:
+        return cache[key], True
+
+    start, end = month_range(year, month)
+    result = compute_usage(users_getter(), start, end, quiet=quiet)
+    cache[key] = result
+    save_usage_cache(cache)
+    return result, False
+
+
+def monthly_usage_report():
+    """ Report cloud recording usage one month at a time, starting with the
+        current month and going backwards. Results are cached per month; a
+        cached month is reported from the cache instead of re-querying Zoom.
+        The current (in-progress) month is always refreshed since it changes.
+    """
+    today = datetime.now(timezone.utc)
+
+    try:
+        months = int(input("How many months to report (including current)? [1]: ").strip() or "1")
+    except ValueError:
+        months = 1
+    months = max(1, months)
+
+    cache = load_usage_cache()
+    users_getter = _lazy_users()
+
+    year, month = today.year, today.month
+    for _ in range(months):
+        key = f"{year:04d}-{month:02d}"
+        result, from_cache = get_month_usage(users_getter, year, month, cache)
+        source = "from cache" if from_cache else (
+            "current month, live" if key == today.strftime("%Y-%m") else "querying Zoom"
+        )
+        print(f"\n{Color.BOLD}{key} usage ({source}){Color.END}")
+        print_usage_table(result)
+
+        # step back one month
+        month -= 1
+        if month == 0:
+            month = 12
+            year -= 1
+
+
+def _lazy_users():
+    """ Return a callable that fetches and memoizes the Zoom user list, so it is
+        only retrieved when actually needed (e.g. on a cache miss). """
+    cached = {}
+
+    def getter():
+        if "users" not in cached:
+            print(f"{Color.BOLD}Getting user accounts...{Color.END}")
+            cached["users"] = get_users()
+        return cached["users"]
+
+    return getter
+
+
+def load_archive_settings():
+    try:
+        with open(ARCHIVE_SETTINGS_FILE, "r", encoding="utf-8") as fd:
+            return json.load(fd)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def save_archive_settings(settings):
+    with open(ARCHIVE_SETTINGS_FILE, "w", encoding="utf-8") as fd:
+        json.dump(settings, fd, indent=2)
+
+
+def prompt_plan():
+    """ Show the saved cloud storage plan (if any), let the user update it, and
+        return the plan size in bytes. Plan is entered/stored in GB (GiB). """
+    settings = load_archive_settings()
+    plan_gb = settings.get("plan_size_gb")
+
+    if plan_gb:
+        print(
+            f"\n{Color.BOLD}Saved cloud storage plan:{Color.END} "
+            f"{plan_gb} GB ({format_bytes(plan_gb * 1024 ** 3)})"
+        )
+        if input("Update it? (y/n): ").strip().lower() == "y":
+            plan_gb = None
+
+    while not plan_gb:
+        raw = input("Enter your Zoom cloud storage plan size in GB: ").strip()
+        try:
+            plan_gb = float(raw)
+            if plan_gb <= 0:
+                raise ValueError
+        except ValueError:
+            print(f"{Color.RED}### Please enter a positive number of GB.{Color.END}")
+            plan_gb = None
+
+    settings["plan_size_gb"] = plan_gb
+    save_archive_settings(settings)
+    return plan_gb * 1024 ** 3
+
+
+def archive_planner():
+    """ Determine which date range of cloud recordings should be archived to
+        Google Drive to bring Zoom usage under 70% of the storage plan, and
+        show what usage would be if everything older than 30 days were archived.
+    """
+    plan_bytes = prompt_plan()
+    target_bytes = 0.7 * plan_bytes
+
+    today = datetime.now(timezone.utc)
+    users_getter = _lazy_users()
+    cache = load_usage_cache()
+
+    # Build a full month-by-month history from the configured start to this month.
+    print(f"\n{Color.BOLD}Building usage history...{Color.END}")
+    months = []  # (year, month, total_size), oldest first
+    year, month = RECORDING_START_DATE.year, RECORDING_START_DATE.month
+    while (year, month) <= (today.year, today.month):
+        key = f"{year:04d}-{month:02d}"
+        result, from_cache = get_month_usage(users_getter, year, month, cache, quiet=True)
+        source = "cached" if from_cache else "queried"
+        print(f"  {key}: {format_bytes(result['total_size']):>12}  ({source})")
+        months.append((year, month, result["total_size"]))
+        month += 1
+        if month == 13:
+            month, year = 1, year + 1
+
+    total_usage = sum(size for _, _, size in months)
+    pct = (total_usage / plan_bytes * 100) if plan_bytes else 0
+
+    print(f"\n{Color.BOLD}=== Archive plan ==={Color.END}")
+    print(f"Plan size      : {format_bytes(plan_bytes)}")
+    print(f"Current usage  : {format_bytes(total_usage)} ({pct:.1f}% of plan)")
+    print(f"Target (70%)   : {format_bytes(target_bytes)}")
+
+    archive_before = None
+    if total_usage <= target_bytes:
+        print(
+            f"\n{Color.GREEN}Usage is already under 70% of the plan. "
+            f"No archiving required.{Color.END}"
+        )
+    else:
+        archived = 0
+        for (yy, mm, size) in months:  # archive oldest months first
+            archived += size
+            if total_usage - archived <= target_bytes:
+                # keep everything from the month after this one onwards
+                archive_before, _ = month_range(yy, mm)
+                archive_before = archive_before.replace(day=1)
+                # advance to first day of the following month
+                if mm == 12:
+                    archive_before = archive_before.replace(year=yy + 1, month=1)
+                else:
+                    archive_before = archive_before.replace(month=mm + 1)
+                remaining = total_usage - archived
+                break
+        else:
+            # even archiving the whole history would not reach the target
+            archived = total_usage
+            remaining = 0
+            archive_before = today
+
+        earliest, _ = month_range(months[0][0], months[0][1])
+        rem_pct = (remaining / plan_bytes * 100) if plan_bytes else 0
+        print(
+            f"\n{Color.YELLOW}Archive recordings from {earliest.date()} "
+            f"up to {archive_before.date()} (everything before that date).{Color.END}"
+        )
+        print(f"  Would free   : {format_bytes(archived)}")
+        print(f"  Usage after  : {format_bytes(remaining)} ({rem_pct:.1f}% of plan)")
+
+    # "Archive everything but the last 30 days" scenario
+    last30_start = today - timedelta(days=30)
+    print(f"\n{Color.BOLD}Computing last-30-days usage...{Color.END}")
+    kept30 = compute_usage(users_getter(), last30_start, today, quiet=True)["total_size"]
+    pct30 = (kept30 / plan_bytes * 100) if plan_bytes else 0
+    print(
+        f"\n{Color.BOLD}If you archived everything older than 30 days "
+        f"(before {last30_start.date()}):{Color.END}"
+    )
+    print(f"  Remaining usage: {format_bytes(kept30)} ({pct30:.1f}% of plan)")
+
+    return archive_before
+
+
+def delete_cloud_recording(meeting_uuid):
+    """ Move a meeting's cloud recordings to the Zoom trash (recoverable for
+        ~30 days). Returns (ok, message) so callers can report the reason. """
+    # Per Zoom's API, the UUID must be double URL-encoded ONLY when it begins
+    # with '/' or contains '//'; otherwise it must be single-encoded. Always
+    # double-encoding a normal UUID produces a wrong path and a 404.
+    if meeting_uuid.startswith("/") or "//" in meeting_uuid:
+        encoded = quote(quote(meeting_uuid, safe=""), safe="")
+    else:
+        encoded = quote(meeting_uuid, safe="")
+
+    url = f"https://api.zoom.us/v2/meetings/{encoded}/recordings"
+    response = requests.delete(url, headers=AUTHORIZATION_HEADER, params={"action": "trash"})
+
+    if response.ok:
+        return True, "moved to trash"
+
+    try:
+        message = response.json().get("message", response.text)
+    except ValueError:
+        message = response.text
+    return False, f"HTTP {response.status_code}: {message}"
+
+
+def download_recordings_for_users(users, drive_service, delete_after=False):
+    """ Download (and optionally upload to Google Drive) every recording for the
+        given users within the globally configured date range. When delete_after
+        is set, a meeting's cloud recordings are moved to the Zoom trash once all
+        of its files have been uploaded successfully.
+    """
+    for email, user_id, first_name, last_name in users:
+        userInfo = (
+            f"{first_name} {last_name} - {email}" if first_name and last_name else f"{email}"
+        )
+        print(f"\n{Color.BOLD}Getting recording list for {userInfo}{Color.END}")
+
+        recordings = list_recordings(user_id)
+        total_count = len(recordings)
+        print(f"==> Found {total_count} recordings")
+
+        for index, recording in enumerate(recordings):
+            try:
+                meeting_uuid = recording["uuid"]
+
+                if meeting_uuid in COMPLETED_MEETING_IDS:
+                    print(
+                        f"\n==> Skipping already downloaded recording {index + 1} of {total_count}"
+                    )
+                    continue
+
+                downloads = get_downloads(recording)
+
+            except Exception as e:
+                print(
+                    f"{Color.RED}### Failed to get download URLs for recording {index + 1} "
+                    f"of {total_count} due to error: {str(e)}{Color.END}"
+                )
+                continue
+
+            print(f"\n==> Processing recording {index + 1} of {total_count}")
+
+            all_uploaded = True
+            for file_type, file_extension, download_url, recording_type, recording_id in downloads:
+                try:
+                    params = {
+                        "file_extension": file_extension,
+                        "recording": recording,
+                        "recording_id": recording_id,
+                        "recording_type": recording_type,
+                        "email": email
+                    }
+                    filename, folder_name = format_filename(params)
+
+                    sanitized_download_dir = path_validate.sanitize_filepath(
+                        os.sep.join([DOWNLOAD_DIRECTORY, folder_name])
+                    )
+                    sanitized_filename = path_validate.sanitize_filename(filename)
+                    full_filename = os.sep.join([sanitized_download_dir, sanitized_filename])
+
+                    # Check if file exists
+                    print(f"    > Checking if file exists...{sanitized_filename} in folder {folder_name}")
+                    found_file = False
+                    try:
+                        found_file = drive_service.file_exists(folder_name, sanitized_filename)  # Check if file exists
+                    except Exception as e:
+                        print(f"{Color.RED}{str(e)}{Color.END}"  )
+                        print(f"FAILED: Checking if file exists...{sanitized_filename} in folder {folder_name}")
+                        all_uploaded = False
+                        continue
+
+                    if found_file:
+                        print(f"    > Skipping existing file: {sanitized_filename}")
+                        continue
+
+                    print(f"    > Downloading {filename}")
+                    if download_recording(download_url, email, filename, folder_name):
+                        if GDRIVE_ENABLED and drive_service:
+                            print(f"    > Uploading to Google Drive...")
+                            print("Google Drive Folder name: %s. full file name: %s, sanitized_file_name: %s" % (folder_name, full_filename, sanitized_filename))
+                            success = drive_service.upload_file(full_filename, folder_name, sanitized_filename)
+                            if success and os.path.exists(full_filename):
+                                os.remove(full_filename)
+                                if not os.listdir(sanitized_download_dir):
+                                    os.rmdir(sanitized_download_dir)
+                            if not success:
+                                all_uploaded = False
+                    else:
+                        all_uploaded = False
+
+                except Exception as e:
+                    all_uploaded = False
+                    print(
+                        f"{Color.RED}### Failed to process file {file_type} "
+                        f"for recording {index + 1} of {total_count} due to error: "
+                        f"{str(e)}{Color.END}"
+                    )
+                    continue
+
+            with open(COMPLETED_MEETING_IDS_LOG, "a") as fd:
+                fd.write(f"{meeting_uuid}\n")
+                COMPLETED_MEETING_IDS.add(meeting_uuid)
+
+            # Free Zoom storage only once every file is safely in Google Drive
+            if delete_after and all_uploaded and GDRIVE_ENABLED and drive_service:
+                ok, message = delete_cloud_recording(meeting_uuid)
+                if ok:
+                    print(f"    > {Color.YELLOW}Removed from Zoom (moved to trash){Color.END}")
+                else:
+                    print(f"{Color.RED}### Failed to delete recording from Zoom - {message}{Color.END}")
+
+
+def run_archive():
+    """ Plan and execute archiving of old cloud recordings to Google Drive so
+        that Zoom usage stays under 70% of the storage plan. """
+    global GDRIVE_ENABLED, RECORDING_END_DATE
+
+    print("\nArchiving copies recordings to Google Drive, so it is required as the destination.")
+    drive_service = setup_google_drive()
+    if not drive_service:
+        print(f"{Color.RED}### Google Drive is not available; cannot archive.{Color.END}")
+        return
+    GDRIVE_ENABLED = True
+
+    load_completed_meeting_ids()
+
+    archive_before = archive_planner()
+    if not archive_before:
+        return
+
+    proceed = input(
+        f"\nArchive recordings before {archive_before.date()} to Google Drive now? (y/n): "
+    ).strip().lower()
+    if proceed != "y":
+        print("Archive cancelled.")
+        return
+
+    print(
+        f"\n{Color.RED}After a successful upload, recordings can be removed from Zoom to free "
+        f"space.{Color.END}\nThey are moved to the Zoom trash (recoverable for ~30 days), "
+        f"not permanently deleted."
+    )
+    delete_after = input(
+        "Delete from Zoom after successful upload? Type 'DELETE' to confirm: "
+    ).strip() == "DELETE"
+
+    # Archive everything before the computed cutoff date
+    RECORDING_END_DATE = archive_before
+
+    print(f"{Color.BOLD}Getting user accounts...{Color.END}")
+    users = get_users()
+    download_recordings_for_users(users, drive_service, delete_after=delete_after)
+    print(f"\n{Color.GREEN}Archive complete.{Color.END}")
+
+
+def recording_files_in_drive(drive_service, email, recording):
+    """ Return (all_present, checked) for a recording: whether every file is
+        already in Google Drive, and how many files were checked. """
+    downloads = get_downloads(recording)
+    all_present = True
+    for file_type, file_extension, download_url, recording_type, recording_id in downloads:
+        params = {
+            "file_extension": file_extension,
+            "recording": recording,
+            "recording_id": recording_id,
+            "recording_type": recording_type,
+            "email": email,
+        }
+        filename, folder_name = format_filename(params)
+        sanitized_filename = path_validate.sanitize_filename(filename)
+        if not drive_service.file_exists(folder_name, sanitized_filename):
+            print(f"  {Color.RED}Missing in Drive:{Color.END} {sanitized_filename}")
+            all_present = False
+    return all_present, len(downloads)
+
+
+def delete_recording_by_name():
+    """ Ask for a Zoom recording name (topic), find matching recordings, and for
+        each one that is already fully present in Google Drive, delete it from
+        Zoom (move to trash). Recordings not found in Drive are left untouched.
+    """
+    global GDRIVE_ENABLED
+
+    print("\nThis verifies a recording is archived in Google Drive before deleting it from Zoom.")
+    drive_service = setup_google_drive()
+    if not drive_service:
+        print(f"{Color.RED}### Google Drive is not available; cannot verify archives.{Color.END}")
+        return
+    GDRIVE_ENABLED = True
+
+    name = input("\nEnter the Zoom recording name (topic) to delete: ").strip()
+    if not name:
+        print("No name entered.")
+        return
+
+    prompt_date_range()
+
+    print(f"{Color.BOLD}Getting user accounts...{Color.END}")
+    users = get_users()
+
+    matches = []  # (email, recording)
+    for email, user_id, first_name, last_name in users:
+        for recording in list_recordings(user_id):
+            if name.lower() in recording.get("topic", "").lower():
+                matches.append((email, recording))
+
+    if not matches:
+        print(f"\n{Color.YELLOW}No recordings matching '{name}' found in the selected range.{Color.END}")
+        return
+
+    print(f"\n{Color.BOLD}Found {len(matches)} matching recording(s).{Color.END}")
+
+    for email, recording in matches:
+        topic = recording.get("topic", "")
+        start = recording.get("start_time", "")
+        meeting_uuid = recording["uuid"]
+        print(f"\n=== {topic} ({start}) - {email} ===")
+
+        try:
+            all_present, checked = recording_files_in_drive(drive_service, email, recording)
+        except Exception as e:
+            print(f"  {Color.RED}Could not list files for this recording: {e}{Color.END}")
+            continue
+
+        if checked == 0:
+            print("  No downloadable files for this recording; skipping.")
+            continue
+
+        if not all_present:
+            print(
+                f"  {Color.RED}Not all files are in Google Drive; "
+                f"NOT deleting from Zoom.{Color.END}"
+            )
+            continue
+
+        print(f"  {Color.GREEN}All {checked} file(s) present in Google Drive.{Color.END}")
+        if input("  Delete this recording from Zoom? (y/n): ").strip().lower() != "y":
+            print("  Skipped.")
+            continue
+
+        ok, message = delete_cloud_recording(meeting_uuid)
+        if ok:
+            print(f"  {Color.GREEN}Deleted from Zoom ({message}).{Color.END}")
+        else:
+            print(f"  {Color.RED}Failed to delete from Zoom - {message}{Color.END}")
+
+
+def pick_user(users):
+    """ Print a numbered list of users and return the one the operator selects
+        (by number or email). """
+    print(f"\n{Color.BOLD}Users:{Color.END}")
+    for i, (email, user_id, first_name, last_name) in enumerate(users, 1):
+        name = f"{first_name} {last_name}".strip()
+        print(f"  {i}. {email}" + (f" ({name})" if name else ""))
+
+    while True:
+        raw = input("Pick a user by number or email: ").strip()
+        if raw.isdigit():
+            idx = int(raw)
+            if 1 <= idx <= len(users):
+                return users[idx - 1]
+        else:
+            for user in users:
+                if user[0].lower() == raw.lower():
+                    return user
+        print(f"{Color.RED}### Invalid selection. Try again.{Color.END}")
+
+
+def check_recordings_in_drive():
+    """ For a chosen user and date range, list their Zoom recordings and report
+        which files already exist in Google Drive, plus a final summary. """
+    global GDRIVE_ENABLED
+
+    print("\nThis checks which of a user's Zoom recordings already exist in Google Drive.")
+    drive_service = setup_google_drive()
+    if not drive_service:
+        print(f"{Color.RED}### Google Drive is not available.{Color.END}")
+        return
+    GDRIVE_ENABLED = True
+
+    print(f"{Color.BOLD}Getting user accounts...{Color.END}")
+    users = get_users()
+    email, user_id, first_name, last_name = pick_user(users)
+
+    prompt_date_range()
+
+    recordings = list_recordings(user_id)
+    print(
+        f"\n{Color.BOLD}Found {len(recordings)} recording(s) for {email} "
+        f"from {RECORDING_START_DATE.date()} to {RECORDING_END_DATE.date()}{Color.END}"
+    )
+
+    total_files = 0
+    present_files = 0
+
+    for recording in recordings:
+        topic = recording.get("topic", "")
+        start = recording.get("start_time", "")
+        try:
+            downloads = get_downloads(recording)
+        except Exception:
+            continue
+
+        print(f"\n=== {topic} ({start}) ===")
+        for file_type, file_extension, download_url, recording_type, recording_id in downloads:
+            params = {
+                "file_extension": file_extension,
+                "recording": recording,
+                "recording_id": recording_id,
+                "recording_type": recording_type,
+                "email": email,
+            }
+            filename, folder_name = format_filename(params)
+            sanitized_filename = path_validate.sanitize_filename(filename)
+            exists = drive_service.file_exists(folder_name, sanitized_filename)
+
+            total_files += 1
+            if exists:
+                present_files += 1
+                print(f"  {Color.GREEN}[ON DRIVE]{Color.END} {sanitized_filename}")
+            else:
+                print(f"  {Color.RED}[MISSING] {Color.END} {sanitized_filename}")
+
+    print(f"\n{Color.BOLD}=== Summary for {email} ==={Color.END}")
+    print(f"Recordings (meetings) in Zoom : {len(recordings)}")
+    print(f"Files found in Zoom           : {total_files}")
+    print(f"Present in Google Drive       : {present_files}")
+    print(f"Missing from Google Drive     : {total_files - present_files}")
 
 
 def load_completed_meeting_ids():
@@ -363,6 +1040,41 @@ def main():
         {Color.END}
     """)
 
+    # Operation choice prompt
+    print("\nChoose operation:")
+    print("1. Download cloud recordings")
+    print("2. Report cloud recording usage by user account")
+    print("3. Monthly cloud recording usage (cached)")
+    print("4. Archive recordings to Google Drive (keep usage under 70% of plan)")
+    print("5. Delete a recording from Zoom by name (if archived in Google Drive)")
+    print("6. Check a user's recordings against Google Drive")
+    operation = input("Enter choice (1-6): ")
+
+    if operation == "2":
+        load_access_token()
+        report_cloud_usage()
+        return
+
+    if operation == "3":
+        load_access_token()
+        monthly_usage_report()
+        return
+
+    if operation == "4":
+        load_access_token()
+        run_archive()
+        return
+
+    if operation == "5":
+        load_access_token()
+        delete_recording_by_name()
+        return
+
+    if operation == "6":
+        load_access_token()
+        check_recordings_in_drive()
+        return
+
     # Storage choice prompt
     print("\nChoose download method:")
     print("1. Local Storage")
@@ -378,81 +1090,15 @@ def main():
         if not drive_service:
             GDRIVE_ENABLED = False
 
+    prompt_date_range()
+
     load_access_token()
     load_completed_meeting_ids()
 
     print(f"{Color.BOLD}Getting user accounts...{Color.END}")
     users = get_users()
 
-    for email, user_id, first_name, last_name in users:
-        userInfo = (
-            f"{first_name} {last_name} - {email}" if first_name and last_name else f"{email}"
-        )
-        print(f"\n{Color.BOLD}Getting recording list for {userInfo}{Color.END}")
-
-        recordings = list_recordings(user_id)
-        total_count = len(recordings)
-        print(f"==> Found {total_count} recordings")
-
-        for index, recording in enumerate(recordings):
-            try:
-                recording_id = recording["uuid"]
-
-                if recording_id in COMPLETED_MEETING_IDS:
-                    print(
-                        f"\n==> Skipping already downloaded recording {index + 1} of {total_count}"
-                    )
-                    continue
-
-                downloads = get_downloads(recording)
-
-            except Exception as e:
-                print(
-                    f"{Color.RED}### Failed to get download URLs for recording {index + 1} "
-                    f"of {total_count} due to error: {str(e)}{Color.END}"
-                )
-                continue
-
-            print(f"\n==> Processing recording {index + 1} of {total_count}")
-
-            for file_type, file_extension, download_url, recording_type, recording_id in downloads:
-                try:
-                    params = {
-                        "file_extension": file_extension,
-                        "recording": recording,
-                        "recording_id": recording_id,
-                        "recording_type": recording_type,
-			"email": email
-                    }
-                    filename, folder_name = format_filename(params)
-
-                    print(f"    > Downloading {filename}")
-                    sanitized_download_dir = path_validate.sanitize_filepath(
-                        os.sep.join([DOWNLOAD_DIRECTORY, folder_name])
-                    )
-                    sanitized_filename = path_validate.sanitize_filename(filename)
-                    full_filename = os.sep.join([sanitized_download_dir, sanitized_filename])
-
-                    if download_recording(download_url, email, filename, folder_name):
-                        if GDRIVE_ENABLED and drive_service:
-                            print(f"    > Uploading to Google Drive...")
-                            success = drive_service.upload_file(full_filename, folder_name, sanitized_filename)
-                            if success and os.path.exists(full_filename):
-                                os.remove(full_filename)
-                                if not os.listdir(sanitized_download_dir):
-                                    os.rmdir(sanitized_download_dir)
-
-                except Exception as e:
-                    print(
-                        f"{Color.RED}### Failed to process file {file_type} "
-                        f"for recording {index + 1} of {total_count} due to error: "
-                        f"{str(e)}{Color.END}"
-                    )
-                    continue
-
-            with open(COMPLETED_MEETING_IDS_LOG, "a") as fd:
-                fd.write(f"{recording_id}\n")
-                COMPLETED_MEETING_IDS.add(recording_id)
+    download_recordings_for_users(users, drive_service)
 
 
 if __name__ == "__main__":

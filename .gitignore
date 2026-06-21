@@ -1,3 +1,6 @@
+zoom-app.creds.txt 
+client_secrets.json
+
 # Ignore Mac system files
 .DS_store
 
@@ -42,3 +45,6 @@ token.json
 
 # Ignore Zoom recording downloader credentials
 client_secret.json
+
+usage-cache.json
+archive-settings.json
