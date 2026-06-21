@@ -579,6 +579,26 @@ def save_archive_settings(settings):
         json.dump(settings, fd, indent=2)
 
 
+def load_last_check_range():
+    """ Return (start, end) UTC datetimes saved from the last check run, or None. """
+    saved = load_archive_settings().get("check_range")
+    if not saved:
+        return None
+    try:
+        start = parser.parse(saved["start"]).replace(tzinfo=timezone.utc)
+        end = parser.parse(saved["end"]).replace(tzinfo=timezone.utc)
+        return start, end
+    except (KeyError, ValueError, OverflowError):
+        return None
+
+
+def save_last_check_range(start, end):
+    """ Persist the date range used by the check option so the next run reuses it. """
+    settings = load_archive_settings()
+    settings["check_range"] = {"start": str(start.date()), "end": str(end.date())}
+    save_archive_settings(settings)
+
+
 def prompt_plan():
     """ Show the saved cloud storage plan (if any), let the user update it, and
         return the plan size in bytes. Plan is entered/stored in GB (GiB). """
@@ -988,8 +1008,9 @@ def pick_user(users):
 
 def check_recordings_in_drive():
     """ For a chosen user and date range, list their Zoom recordings and report
-        which files already exist in Google Drive, plus a final summary. """
-    global GDRIVE_ENABLED
+        which files already exist in Google Drive, plus a final summary. The date
+        range from the previous run is reused as the default. """
+    global GDRIVE_ENABLED, RECORDING_START_DATE, RECORDING_END_DATE
 
     print("\nThis checks which of a user's Zoom recordings already exist in Google Drive.")
     drive_service = setup_google_drive()
@@ -1002,9 +1023,14 @@ def check_recordings_in_drive():
     users = get_users()
     email, user_id, first_name, last_name = pick_user(users)
 
+    # Default to the range used last time this option ran, if any
+    last_range = load_last_check_range()
+    if last_range:
+        RECORDING_START_DATE, RECORDING_END_DATE = last_range
     prompt_date_range()
 
     while True:
+        save_last_check_range(RECORDING_START_DATE, RECORDING_END_DATE)
         recordings = list_recordings(user_id)
         print(
             f"\n{Color.BOLD}Found {len(recordings)} recording(s) for {email} "
