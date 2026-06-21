@@ -7,6 +7,8 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from googleapiclient.errors import HttpError
+import re
+import time
 
 class Color:
     PURPLE = "\033[95m"
@@ -116,6 +118,57 @@ class GoogleDriveClient:
                         return self._handle_upload_with_refresh(request)
             raise
 
+    def file_exists(self, folder_path, file_name):
+        print(f"Checking for file {file_name} in folder {folder_path}")
+        folder_id = self.root_folder_id
+        for folder in folder_path.split(os.sep):
+            if not folder:
+                continue
+
+        
+            query = f"name='{folder}' and mimeType='application/vnd.google-apps.folder'"
+
+            if folder_id:
+                query += f" and '{folder_id}' in parents"
+            print(f"query: {query}")
+
+            results=self.service.files().list(
+                q=query,
+                spaces='drive',
+                fields='files(id, name)'
+            ).execute()
+            files = results.get('files', [])
+            if not files:
+                return False
+            folder_id = files[0]['id']
+            print(f"Found folder {folder} with ID {folder_id}")
+            
+        
+        # Regular expression to extract the order ID
+        tokens = file_name.split()
+        largest_token = max(tokens, key=len)
+        print(f"largest_token: {largest_token}")
+        query = f" fullText contains '{largest_token}' and trashed = false and '{folder_id}' in parents"
+        print(f"query: {query}")
+        results = self.service.files().list(
+            q=query,
+            spaces='drive',
+            fields='files(id, name)'
+        ).execute()
+        files = results.get('files', [])
+
+        found_file = False
+        if len(files) > 0:
+            found_file_name = files[0]['name']
+            print(f"       Found file: {found_file_name}")
+            print(f"Searched for file: {file_name}")
+            found_file = found_file_name == file_name
+        
+        print(f"Found file: {found_file}")
+        print("")
+
+        return found_file
+        
     def create_folder(self, folder_name, parent_id=None):
         """Create a folder in Google Drive and return its ID."""
         file_metadata = {
@@ -156,8 +209,10 @@ class GoogleDriveClient:
                 
                 if results.get('files'):
                     current_parent = results['files'][0]['id']
+                    print("Found existing folder %s" % (folder_path))
                 else:
                     current_parent = self.create_folder(folder, current_parent)
+                    print("Created a new folder %s" % (folder_path))
                     if not current_parent:
                         return None
             except Exception as e:
@@ -215,6 +270,8 @@ class GoogleDriveClient:
     def initialize_root_folder(self):
         """Create root folder with timestamp."""
         timestamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
-        root_folder_name = f"{self.config.get('root_folder_name', 'zoom-recording-downloader')}-{timestamp}"
-        self.root_folder_id = self.create_folder(root_folder_name)
+        # root_folder_name = f"{self.config.get('root_folder_name', 'zoom-recording-downloader')}-{timestamp}"
+        root_folder_name = f"{self.config.get('root_folder_name', 'zoom-recording-downloader')}"
+        # self.root_folder_id = self.create_folder(root_folder_name)
+        self.root_folder_id = self.get_or_create_folder_path(root_folder_name)
         return self.root_folder_id is not None
