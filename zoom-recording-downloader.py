@@ -326,18 +326,10 @@ def format_bytes(size):
         size /= 1024.0
 
 
-def prompt_date_range():
-    """ Show the configured date range and let the user optionally change it.
-        Updates the global RECORDING_START_DATE / RECORDING_END_DATE.
-    """
+def input_date_range():
+    """ Prompt for a new start/end date and update the global
+        RECORDING_START_DATE / RECORDING_END_DATE. """
     global RECORDING_START_DATE, RECORDING_END_DATE
-
-    print(
-        f"\n{Color.BOLD}Current date range:{Color.END} "
-        f"{RECORDING_START_DATE.date()} to {RECORDING_END_DATE.date()}"
-    )
-    if input("Would you like to change it? (y/n): ").strip().lower() != "y":
-        return
 
     while True:
         start_input = input("Enter start date (YYYY-MM-DD): ").strip()
@@ -356,6 +348,20 @@ def prompt_date_range():
         RECORDING_START_DATE = start
         RECORDING_END_DATE = end
         return
+
+
+def prompt_date_range():
+    """ Show the configured date range and let the user optionally change it.
+        Updates the global RECORDING_START_DATE / RECORDING_END_DATE.
+    """
+    print(
+        f"\n{Color.BOLD}Current date range:{Color.END} "
+        f"{RECORDING_START_DATE.date()} to {RECORDING_END_DATE.date()}"
+    )
+    if input("Would you like to change it? (y/n): ").strip().lower() != "y":
+        return
+
+    input_date_range()
 
 
 def compute_usage(users, start_date, end_date, quiet=False):
@@ -943,48 +949,56 @@ def check_recordings_in_drive():
 
     prompt_date_range()
 
-    recordings = list_recordings(user_id)
-    print(
-        f"\n{Color.BOLD}Found {len(recordings)} recording(s) for {email} "
-        f"from {RECORDING_START_DATE.date()} to {RECORDING_END_DATE.date()}{Color.END}"
-    )
+    while True:
+        recordings = list_recordings(user_id)
+        print(
+            f"\n{Color.BOLD}Found {len(recordings)} recording(s) for {email} "
+            f"from {RECORDING_START_DATE.date()} to {RECORDING_END_DATE.date()}{Color.END}"
+        )
 
-    total_files = 0
-    present_files = 0
+        total_files = 0
+        present_files = 0
 
-    for recording in recordings:
-        topic = recording.get("topic", "")
-        start = recording.get("start_time", "")
-        try:
-            downloads = get_downloads(recording)
-        except Exception:
-            continue
+        for recording in recordings:
+            topic = recording.get("topic", "")
+            start = recording.get("start_time", "")
+            try:
+                downloads = get_downloads(recording)
+            except Exception:
+                continue
 
-        print(f"\n=== {topic} ({start}) ===")
-        for file_type, file_extension, download_url, recording_type, recording_id in downloads:
-            params = {
-                "file_extension": file_extension,
-                "recording": recording,
-                "recording_id": recording_id,
-                "recording_type": recording_type,
-                "email": email,
-            }
-            filename, folder_name = format_filename(params)
-            sanitized_filename = path_validate.sanitize_filename(filename)
-            exists = drive_service.file_exists(folder_name, sanitized_filename)
+            print(f"\n=== {topic} ({start}) ===")
+            for file_type, file_extension, download_url, recording_type, recording_id in downloads:
+                params = {
+                    "file_extension": file_extension,
+                    "recording": recording,
+                    "recording_id": recording_id,
+                    "recording_type": recording_type,
+                    "email": email,
+                }
+                filename, folder_name = format_filename(params)
+                sanitized_filename = path_validate.sanitize_filename(filename)
+                exists = drive_service.file_exists(folder_name, sanitized_filename)
 
-            total_files += 1
-            if exists:
-                present_files += 1
-                print(f"  {Color.GREEN}[ON DRIVE]{Color.END} {sanitized_filename}")
-            else:
-                print(f"  {Color.RED}[MISSING] {Color.END} {sanitized_filename}")
+                total_files += 1
+                if exists:
+                    present_files += 1
+                    print(f"  {Color.GREEN}[ON DRIVE]{Color.END} {sanitized_filename}")
+                else:
+                    print(f"  {Color.RED}[MISSING] {Color.END} {sanitized_filename}")
 
-    print(f"\n{Color.BOLD}=== Summary for {email} ==={Color.END}")
-    print(f"Recordings (meetings) in Zoom : {len(recordings)}")
-    print(f"Files found in Zoom           : {total_files}")
-    print(f"Present in Google Drive       : {present_files}")
-    print(f"Missing from Google Drive     : {total_files - present_files}")
+        print(f"\n{Color.BOLD}=== Summary for {email} "
+              f"({RECORDING_START_DATE.date()} to {RECORDING_END_DATE.date()}) ==={Color.END}")
+        print(f"Recordings (meetings) in Zoom : {len(recordings)}")
+        print(f"Files found in Zoom           : {total_files}")
+        print(f"Present in Google Drive       : {present_files}")
+        print(f"Missing from Google Drive     : {total_files - present_files}")
+
+        if input(
+            f"\nTest {email} against a different time range? (y/n): "
+        ).strip().lower() != "y":
+            return
+        input_date_range()
 
 
 def load_completed_meeting_ids():
