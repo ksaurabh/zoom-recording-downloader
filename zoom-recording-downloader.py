@@ -668,11 +668,16 @@ def delete_cloud_recording(meeting_uuid):
     return False, f"HTTP {response.status_code}: {message}"
 
 
-def download_recordings_for_users(users, drive_service, delete_after=False):
+def download_recordings_for_users(users, drive_service, delete_after=False, recheck_drive=False):
     """ Download (and optionally upload to Google Drive) every recording for the
         given users within the globally configured date range. When delete_after
         is set, a meeting's cloud recordings are moved to the Zoom trash once all
         of its files have been uploaded successfully.
+
+        By default a meeting listed in completed-downloads.log is skipped without
+        contacting Drive. When recheck_drive is set (used by archiving), that log
+        is ignored and each file's presence is verified directly against Drive,
+        so genuinely-missing files are picked up even if the meeting was logged.
     """
     for email, user_id, first_name, last_name in users:
         userInfo = (
@@ -688,7 +693,7 @@ def download_recordings_for_users(users, drive_service, delete_after=False):
             try:
                 meeting_uuid = recording["uuid"]
 
-                if meeting_uuid in COMPLETED_MEETING_IDS:
+                if not recheck_drive and meeting_uuid in COMPLETED_MEETING_IDS:
                     print(
                         f"\n==> Skipping already downloaded recording {index + 1} of {total_count}"
                     )
@@ -814,7 +819,9 @@ def run_archive():
 
     print(f"{Color.BOLD}Getting user accounts...{Color.END}")
     users = get_users()
-    download_recordings_for_users(users, drive_service, delete_after=delete_after)
+    download_recordings_for_users(
+        users, drive_service, delete_after=delete_after, recheck_drive=True
+    )
     print(f"\n{Color.GREEN}Archive complete.{Color.END}")
 
 
