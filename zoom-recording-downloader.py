@@ -504,6 +504,54 @@ def monthly_usage_report():
             year -= 1
 
 
+def monthly_usage_cached_vs_now():
+    """ For each month (starting with the current one, going back), compare the
+        cached storage figure against a freshly-queried "now" figure. Useful for
+        spotting drift when recordings were added or deleted since the cache was
+        written. The cache is read-only here; it is not modified.
+    """
+    today = datetime.now(timezone.utc)
+
+    try:
+        months = int(input("How many months to compare (including current)? [1]: ").strip() or "1")
+    except ValueError:
+        months = 1
+    months = max(1, months)
+
+    cache = load_usage_cache()
+    print(f"{Color.BOLD}Getting user accounts...{Color.END}")
+    users = get_users()
+
+    header = f"{'Month':<9}{'Cached':>14}{'Now':>14}{'Difference':>16}"
+    print(f"\n{Color.BOLD}{header}{Color.END}")
+    print("-" * len(header))
+
+    year, month = today.year, today.month
+    for _ in range(months):
+        key = f"{year:04d}-{month:02d}"
+        start, end = month_range(year, month)
+
+        cached_entry = cache.get(key)
+        cached_size = int(cached_entry["total_size"]) if cached_entry else None
+        now_size = compute_usage(users, start, end, quiet=True)["total_size"]
+
+        cached_str = format_bytes(cached_size) if cached_entry else "(not cached)"
+        if cached_entry:
+            diff = now_size - cached_size
+            sign = "+" if diff > 0 else ""
+            diff_str = "same" if diff == 0 else f"{sign}{format_bytes(diff)}"
+        else:
+            diff_str = "-"
+
+        print(f"{key:<9}{cached_str:>14}{format_bytes(now_size):>14}{diff_str:>16}")
+
+        # step back one month
+        month -= 1
+        if month == 0:
+            month = 12
+            year -= 1
+
+
 def _lazy_users():
     """ Return a callable that fetches and memoizes the Zoom user list, so it is
         only retrieved when actually needed (e.g. on a cache miss). """
@@ -1069,7 +1117,8 @@ def main():
     print("4. Archive recordings to Google Drive (keep usage under 70% of plan)")
     print("5. Delete a recording from Zoom by name (if archived in Google Drive)")
     print("6. Check a user's recordings against Google Drive")
-    operation = input("Enter choice (1-6): ")
+    print("7. Monthly cloud recording usage (cached vs. now)")
+    operation = input("Enter choice (1-7): ")
 
     if operation == "2":
         load_access_token()
@@ -1089,6 +1138,11 @@ def main():
     if operation == "5":
         load_access_token()
         delete_recording_by_name()
+        return
+
+    if operation == "7":
+        load_access_token()
+        monthly_usage_cached_vs_now()
         return
 
     if operation == "6":
