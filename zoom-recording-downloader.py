@@ -99,26 +99,33 @@ GDRIVE_RETRY_DELAY = int(config("GoogleDrive", "retry_delay", "5"))
 GDRIVE_MAX_RETRIES = int(config("GoogleDrive", "max_retries", "3"))
 GDRIVE_FAILED_LOG = config("GoogleDrive", "failed_log", "failed-uploads.log")
 
-def setup_google_drive():
-    """Initialize Google Drive client with OAuth authentication"""
+def setup_google_drive(auto=False):
+    """Initialize Google Drive client with OAuth authentication.
+       In auto mode, failures return None without any interactive prompt."""
     try:
         drive_client = GoogleDriveClient(CONF.get('GoogleDrive', {}))
         if not drive_client.authenticate():
+            if auto:
+                return None
             choice = input("Would you like to continue with local storage instead? (y/n): ")
             if choice.lower() != 'y':
                 system.exit(1)
             return None
-            
+
         if not drive_client.initialize_root_folder():
             print(f"{Color.RED}### Failed to create root folder in Google Drive{Color.END}")
+            if auto:
+                return None
             choice = input("Would you like to continue with local storage instead? (y/n): ")
             if choice.lower() != 'y':
                 system.exit(1)
             return None
-            
+
         return drive_client
     except Exception as e:
         print(f"{Color.RED}### Google Drive initialization failed: {str(e)}{Color.END}")
+        if auto:
+            return None
         choice = input("Would you like to continue with local storage instead? (y/n): ")
         if choice.lower() != 'y':
             system.exit(1)
@@ -599,11 +606,23 @@ def save_last_check_range(start, end):
     save_archive_settings(settings)
 
 
-def prompt_plan():
+def prompt_plan(auto=False):
     """ Show the saved cloud storage plan (if any), let the user update it, and
-        return the plan size in bytes. Plan is entered/stored in GB (GiB). """
+        return the plan size in bytes. Plan is entered/stored in GB (GiB).
+        In auto mode the saved plan is used as-is (no prompts); returns None if
+        no plan has been saved yet. """
     settings = load_archive_settings()
     plan_gb = settings.get("plan_size_gb")
+
+    if auto:
+        if not plan_gb:
+            print(f"{Color.RED}### No saved plan found. Run option 4 once to set it.{Color.END}")
+            return None
+        print(
+            f"{Color.BOLD}Using saved cloud storage plan:{Color.END} "
+            f"{plan_gb} GB ({format_bytes(plan_gb * 1024 ** 3)})"
+        )
+        return plan_gb * 1024 ** 3
 
     if plan_gb:
         print(
@@ -628,12 +647,14 @@ def prompt_plan():
     return plan_gb * 1024 ** 3
 
 
-def archive_planner():
+def archive_planner(auto=False):
     """ Determine which date range of cloud recordings should be archived to
         Google Drive to bring Zoom usage under 70% of the storage plan, and
         show what usage would be if everything older than 30 days were archived.
     """
-    plan_bytes = prompt_plan()
+    plan_bytes = prompt_plan(auto=auto)
+    if plan_bytes is None:
+        return None
     target_bytes = 0.7 * plan_bytes
 
     today = datetime.now(timezone.utc)
@@ -848,13 +869,20 @@ def download_recordings_for_users(users, drive_service, delete_after=False, rech
                     print(f"{Color.RED}### Failed to delete recording from Zoom - {message}{Color.END}")
 
 
-def run_archive():
+def run_archive(auto=False):
     """ Plan and execute archiving of old cloud recordings to Google Drive so
-        that Zoom usage stays under 70% of the storage plan. """
+        that Zoom usage stays under 70% of the storage plan.
+
+        In auto mode it runs unattended: it uses the saved plan (no prompt),
+        auto-confirms the archive, and deletes archived recordings from Zoom
+        (trash) after a successful upload. """
     global GDRIVE_ENABLED, RECORDING_END_DATE
 
+    if auto:
+        print(f"{Color.BOLD}=== Auto archive mode ==={Color.END}")
+
     print("\nArchiving copies recordings to Google Drive, so it is required as the destination.")
-    drive_service = setup_google_drive()
+    drive_service = setup_google_drive(auto=auto)
     if not drive_service:
         print(f"{Color.RED}### Google Drive is not available; cannot archive.{Color.END}")
         return
@@ -862,25 +890,34 @@ def run_archive():
 
     load_completed_meeting_ids()
 
-    archive_before = archive_planner()
+    archive_before = archive_planner(auto=auto)
     if not archive_before:
         return
 
-    proceed = input(
-        f"\nArchive recordings before {archive_before.date()} to Google Drive now? (y/n): "
-    ).strip().lower()
-    if proceed != "y":
-        print("Archive cancelled.")
-        return
+    if auto:
+        print(f"\nAuto: archiving recordings before {archive_before.date()} to Google Drive.")
+    else:
+        proceed = input(
+            f"\nArchive recordings before {archive_before.date()} to Google Drive now? (y/n): "
+        ).strip().lower()
+        if proceed != "y":
+            print("Archive cancelled.")
+            return
 
-    print(
-        f"\n{Color.RED}After a successful upload, recordings can be removed from Zoom to free "
-        f"space.{Color.END}\nThey are moved to the Zoom trash (recoverable for ~30 days), "
-        f"not permanently deleted."
-    )
-    delete_after = input(
-        "Delete from Zoom after successful upload? Type 'DELETE' to confirm: "
-    ).strip() == "DELETE"
+    if auto:
+        # Auto mode frees space: trash from Zoom after a successful upload
+        delete_after = True
+        print(f"{Color.YELLOW}Auto: archived recordings will be moved to Zoom trash "
+              f"(recoverable for ~30 days) after a successful upload.{Color.END}")
+    else:
+        print(
+            f"\n{Color.RED}After a successful upload, recordings can be removed from Zoom to free "
+            f"space.{Color.END}\nThey are moved to the Zoom trash (recoverable for ~30 days), "
+            f"not permanently deleted."
+        )
+        delete_after = input(
+            "Delete from Zoom after successful upload? Type 'DELETE' to confirm: "
+        ).strip() == "DELETE"
 
     # Archive everything before the computed cutoff date
     RECORDING_END_DATE = archive_before
@@ -1134,6 +1171,12 @@ def main():
 
         {Color.END}
     """)
+
+    # Non-interactive auto mode: run option 4 (archive) using the saved plan
+    if "--auto" in system.argv:
+        load_access_token()
+        run_archive(auto=True)
+        return
 
     # Operation choice prompt
     print("\nChoose operation:")
