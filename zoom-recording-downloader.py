@@ -96,6 +96,9 @@ DRIVE_LOOKUP_CACHE = {}
 USE_ZOOM_CACHE = False
 USE_DRIVE_CACHE = False
 
+# Wall-clock start of the current archive/dry-run, for elapsed-time progress.
+ARCHIVE_START_TS = None
+
 MEETING_TIMEZONE = ZoneInfo(config("Recordings", "timezone", 'UTC'))
 MEETING_STRFTIME = config("Recordings", "strftime", '%Y.%m.%d - %I.%M %p UTC')
 MEETING_FILENAME = config("Recordings", "filename", '{meeting_time} - {topic} - {rec_type} - {recording_id}.{file_extension}')
@@ -870,12 +873,28 @@ def _recording_day(recording):
         return None
 
 
+def format_elapsed(seconds):
+    """ Render a duration in seconds as a compact h/m/s string. """
+    seconds = int(seconds)
+    hours, rem = divmod(seconds, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}h {minutes}m {secs}s"
+    if minutes:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
 def _print_archive_progress(email, day):
     """ Emit a one-line progress marker once a user's day has been fully archived,
-        naming the user and the most recent date incorporated. """
+        naming the user, the most recent date incorporated, and how long the run
+        has been going. """
+    elapsed = ""
+    if ARCHIVE_START_TS is not None:
+        elapsed = f" [running {format_elapsed(time.time() - ARCHIVE_START_TS)}]"
     print(
         f"{Color.GREEN}>>> Archive progress: completed {email} "
-        f"through {day}{Color.END}"
+        f"through {day}{elapsed}{Color.END}"
     )
 
 
@@ -890,6 +909,9 @@ def download_recordings_for_users(users, drive_service, delete_after=False, rech
         is ignored and each file's presence is verified directly against Drive,
         so genuinely-missing files are picked up even if the meeting was logged.
     """
+    global ARCHIVE_START_TS
+    ARCHIVE_START_TS = time.time()
+
     for email, user_id, first_name, last_name in users:
         userInfo = (
             f"{first_name} {last_name} - {email}" if first_name and last_name else f"{email}"
@@ -1104,26 +1126,31 @@ def _iter_recording_files(recording):
         yield file_extension, recording_id, recording_type, size
 
 
-def dry_run_archive():
+def dry_run_archive(interactive=True):
     """ Option 8: simulate the archive (option 4) without downloading, uploading,
         or deleting anything. It computes the same cutoff date as the real archive,
         then walks every recording that would be archived and tallies the files
         that are NOT yet in Google Drive (i.e. the ones that would be downloaded
         and uploaded), grouped by user account and month. Where Zoom does not
         report a file's size, the file is counted instead. The breakdown is written
-        to archive-YYYY-MM-DD.run.log.csv. """
-    global GDRIVE_ENABLED, RECORDING_END_DATE
+        to archive-YYYY-MM-DD.run.log.csv.
+
+        From the menu (interactive=True) the operator is asked whether to use the
+        caches; the --dry-run CLI flag passes interactive=False to stay unattended.
+        Either way the saved plan is used, so the plan itself is never prompted. """
+    global GDRIVE_ENABLED, RECORDING_END_DATE, ARCHIVE_START_TS
 
     print("\nDry run: nothing is downloaded, uploaded, or deleted.")
-    # Run unattended: use the saved plan and never prompt for input.
+    # Use the saved plan; never prompt for the plan itself.
     drive_service = setup_google_drive(auto=True)
     if not drive_service:
         print(f"{Color.RED}### Google Drive is not available; cannot check what is already archived.{Color.END}")
         return
     GDRIVE_ENABLED = True
 
-    # Dry run is read-only, so it is safe to use both caches and stay unattended.
-    configure_caches(interactive=False, use_zoom=True, use_drive=True)
+    # Dry run is read-only, so both caches are safe to use. From the menu we still
+    # ask; unattended (--dry-run) we default both on without prompting.
+    configure_caches(interactive=interactive, use_zoom=True, use_drive=True)
 
     archive_before = archive_planner(auto=True)
     if not archive_before:
@@ -1135,6 +1162,7 @@ def dry_run_archive():
     print(f"\n{Color.BOLD}Simulating archive of everything before {archive_before.date()}...{Color.END}")
     print(f"{Color.BOLD}Getting user accounts...{Color.END}")
     users = get_users()
+    ARCHIVE_START_TS = time.time()
 
     # group key: (email, "YYYY-MM") -> {"files", "bytes", "unknown"}
     groups = {}
@@ -1495,7 +1523,7 @@ def main():
     # Non-interactive dry run: simulate the archive (option 8) and write the CSV
     if "--dry-run" in system.argv:
         load_access_token()
-        dry_run_archive()
+        dry_run_archive(interactive=False)
         return
 
     # Non-interactive auto mode: run option 4 (archive) using the saved plan
