@@ -12,6 +12,7 @@
 
 # System modules
 import base64
+import csv
 import json
 import os
 import re as regex
@@ -930,6 +931,161 @@ def run_archive(auto=False):
     print(f"\n{Color.GREEN}Archive complete.{Color.END}")
 
 
+def _iter_recording_files(recording):
+    """ Yield (file_extension, recording_id, recording_type, file_size) for each
+        downloadable file of a recording, mirroring get_downloads' type logic.
+        file_size is the Zoom-reported size in bytes, or None when unavailable. """
+    for download in recording.get("recording_files", []) or []:
+        file_type = download.get("file_type", "")
+        file_extension = download.get("file_extension", "")
+        recording_id = download.get("id", "")
+        if file_type == "":
+            recording_type = "incomplete"
+        elif file_type != "TIMELINE":
+            recording_type = download.get("recording_type", "")
+        else:
+            recording_type = file_type
+
+        size = download.get("file_size")
+        try:
+            size = int(size) if size not in (None, "") else None
+        except (ValueError, TypeError):
+            size = None
+        # Zoom occasionally reports 0 for files whose size it hasn't computed yet;
+        # treat that as "unknown" so it is counted, not silently shown as 0 bytes.
+        if size == 0:
+            size = None
+
+        yield file_extension, recording_id, recording_type, size
+
+
+def dry_run_archive():
+    """ Option 8: simulate the archive (option 4) without downloading, uploading,
+        or deleting anything. It computes the same cutoff date as the real archive,
+        then walks every recording that would be archived and tallies the files
+        that are NOT yet in Google Drive (i.e. the ones that would be downloaded
+        and uploaded), grouped by user account and month. Where Zoom does not
+        report a file's size, the file is counted instead. The breakdown is written
+        to archive-YYYY-MM-DD.run.log.csv. """
+    global GDRIVE_ENABLED, RECORDING_END_DATE
+
+    print("\nDry run: nothing is downloaded, uploaded, or deleted.")
+    # Run unattended: use the saved plan and never prompt for input.
+    drive_service = setup_google_drive(auto=True)
+    if not drive_service:
+        print(f"{Color.RED}### Google Drive is not available; cannot check what is already archived.{Color.END}")
+        return
+    GDRIVE_ENABLED = True
+
+    archive_before = archive_planner(auto=True)
+    if not archive_before:
+        return
+
+    # Simulate archiving everything before the computed cutoff date
+    RECORDING_END_DATE = archive_before
+
+    print(f"\n{Color.BOLD}Simulating archive of everything before {archive_before.date()}...{Color.END}")
+    print(f"{Color.BOLD}Getting user accounts...{Color.END}")
+    users = get_users()
+
+    # group key: (email, "YYYY-MM") -> {"files", "bytes", "unknown"}
+    groups = {}
+    grand_files = 0
+    grand_bytes = 0
+    grand_unknown = 0
+
+    for email, user_id, first_name, last_name in users:
+        user_info = (
+            f"{first_name} {last_name} - {email}" if first_name and last_name else f"{email}"
+        )
+        print(f"\n{Color.BOLD}Checking {user_info}{Color.END}")
+        recordings = list_recordings(user_id)
+        print(f"==> {len(recordings)} recording(s) in range")
+
+        for recording in recordings:
+            start_time = recording.get("start_time", "")
+            try:
+                meeting_local = (
+                    parser.parse(start_time)
+                    .replace(tzinfo=timezone.utc)
+                    .astimezone(MEETING_TIMEZONE)
+                )
+                month_key = meeting_local.strftime("%Y-%m")
+            except (ValueError, OverflowError, TypeError):
+                month_key = "unknown"
+
+            for file_extension, recording_id, recording_type, size in _iter_recording_files(recording):
+                params = {
+                    "file_extension": file_extension,
+                    "recording": recording,
+                    "recording_id": recording_id,
+                    "recording_type": recording_type,
+                    "email": email,
+                }
+                filename, folder_name = format_filename(params)
+                sanitized_filename = path_validate.sanitize_filename(filename)
+
+                try:
+                    exists = drive_service.file_exists(folder_name, sanitized_filename)
+                except Exception as e:
+                    # Don't silently drop a file we couldn't verify; count it as
+                    # one that would be downloaded so the estimate stays on the
+                    # safe (over-) side.
+                    print(f"  {Color.RED}Could not check {sanitized_filename}: {e}{Color.END}")
+                    exists = False
+
+                if exists:
+                    continue
+
+                bucket = groups.setdefault((email, month_key), {"files": 0, "bytes": 0, "unknown": 0})
+                bucket["files"] += 1
+                grand_files += 1
+                if size is None:
+                    bucket["unknown"] += 1
+                    grand_unknown += 1
+                else:
+                    bucket["bytes"] += size
+                    grand_bytes += size
+
+    today = datetime.now(timezone.utc).date()
+    csv_path = f"archive-{today}.run.log.csv"
+    with open(csv_path, "w", newline="", encoding="utf-8") as fd:
+        writer = csv.writer(fd)
+        writer.writerow([
+            "email", "month", "files_to_download",
+            "known_size_bytes", "known_size_human", "files_with_unknown_size",
+        ])
+        for (email, month_key) in sorted(groups):
+            b = groups[(email, month_key)]
+            writer.writerow([
+                email, month_key, b["files"],
+                b["bytes"], format_bytes(b["bytes"]), b["unknown"],
+            ])
+        writer.writerow([])
+        writer.writerow([
+            "TOTAL", "", grand_files,
+            grand_bytes, format_bytes(grand_bytes), grand_unknown,
+        ])
+
+    header = f"{'Email':<34}{'Month':>9}{'Files':>8}{'Known size':>14}{'Unknown':>9}"
+    print(f"\n{Color.BOLD}=== Dry run: what would be downloaded/uploaded ==={Color.END}")
+    print(f"{Color.BOLD}{header}{Color.END}")
+    print("-" * len(header))
+    for (email, month_key) in sorted(groups):
+        b = groups[(email, month_key)]
+        print(f"{email:<34}{month_key:>9}{b['files']:>8}{format_bytes(b['bytes']):>14}{b['unknown']:>9}")
+    print("-" * len(header))
+    print(
+        f"{Color.BOLD}{'TOTAL':<34}{'':>9}{grand_files:>8}"
+        f"{format_bytes(grand_bytes):>14}{grand_unknown:>9}{Color.END}"
+    )
+
+    print(f"\nFiles to download : {grand_files} ({grand_unknown} with size unknown to Zoom)")
+    print(f"Estimated volume  : {format_bytes(grand_bytes)} (sum of known file sizes)")
+    print(f"\n{Color.GREEN}Wrote per-user, per-month breakdown to {csv_path}{Color.END}")
+    print(f"{Color.YELLOW}Dry run only — nothing was downloaded, uploaded, or deleted.{Color.END}")
+
+
 def recording_files_in_drive(drive_service, email, recording):
     """ Return (all_present, checked) for a recording: whether every file is
         already in Google Drive, and how many files were checked. """
@@ -1172,6 +1328,12 @@ def main():
         {Color.END}
     """)
 
+    # Non-interactive dry run: simulate the archive (option 8) and write the CSV
+    if "--dry-run" in system.argv:
+        load_access_token()
+        dry_run_archive()
+        return
+
     # Non-interactive auto mode: run option 4 (archive) using the saved plan
     if "--auto" in system.argv:
         load_access_token()
@@ -1187,7 +1349,8 @@ def main():
     print("5. Delete a recording from Zoom by name (if archived in Google Drive)")
     print("6. Check a user's recordings against Google Drive")
     print("7. Monthly cloud recording usage (cached vs. now)")
-    operation = input("Enter choice (1-7): ")
+    print("8. Dry run archive (no download/upload; report volume + CSV)")
+    operation = input("Enter choice (1-8): ")
 
     if operation == "2":
         load_access_token()
@@ -1217,6 +1380,11 @@ def main():
     if operation == "6":
         load_access_token()
         check_recordings_in_drive()
+        return
+
+    if operation == "8":
+        load_access_token()
+        dry_run_archive()
         return
 
     # Storage choice prompt

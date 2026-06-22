@@ -48,3 +48,6 @@ client_secret.json
 
 usage-cache.json
 archive-settings.json
+
+# Ignore dry-run archive reports
+archive-*.run.log.csv
