@@ -1025,7 +1025,7 @@ def _print_archive_progress(email, day, checked, found, missing):
     )
 
 
-def download_recordings_for_users(users, drive_service, delete_after=False, recheck_drive=False):
+def download_recordings_for_users(users, drive_service, delete_after=False, recheck_drive=False, confirm_each=False):
     """ Download (and optionally upload to Google Drive) every recording for the
         given users within the globally configured date range. When delete_after
         is set, a meeting's cloud recordings are moved to the Zoom trash once all
@@ -1035,6 +1035,9 @@ def download_recordings_for_users(users, drive_service, delete_after=False, rech
         contacting Drive. When recheck_drive is set (used by archiving), that log
         is ignored and each file's presence is verified directly against Drive,
         so genuinely-missing files are picked up even if the meeting was logged.
+
+        When confirm_each is set, the operator is asked to approve each download
+        after the file has been confirmed missing from Drive; declining skips it.
     """
     global ARCHIVE_START_TS
     ARCHIVE_START_TS = time.time()
@@ -1120,6 +1123,16 @@ def download_recordings_for_users(users, drive_service, delete_after=False, rech
                         continue
 
                     missing += 1
+                    # Permission gate: only after confirming the file is missing
+                    # from Drive do we ask the operator whether to download it.
+                    if confirm_each:
+                        if input(
+                            f"    > Not on Drive. Download {sanitized_filename} from Zoom? (y/n): "
+                        ).strip().lower() != "y":
+                            print(f"    > {Color.YELLOW}Skipped by user:{Color.END} {sanitized_filename}")
+                            all_uploaded = False
+                            continue
+
                     print(f"    > Downloading {filename}")
                     if download_recording(download_url, email, filename, folder_name):
                         if GDRIVE_ENABLED and drive_service:
@@ -1164,7 +1177,7 @@ def download_recordings_for_users(users, drive_service, delete_after=False, rech
         save_drive_cache()
 
 
-def _archive_specific_user(drive_service):
+def _archive_specific_user(drive_service, confirm_each=False):
     """ Option-4 sub-mode: archive one chosen user's recordings within an entered
         time range, rather than the plan-based cutoff across all users. Google Drive
         and the caches are already initialized by run_archive. """
@@ -1191,7 +1204,7 @@ def _archive_specific_user(drive_service):
     )
     download_recordings_for_users(
         [(email, user_id, first_name, last_name)], drive_service,
-        delete_after=delete_after, recheck_drive=True
+        delete_after=delete_after, recheck_drive=True, confirm_each=confirm_each
     )
     print(f"\n{Color.GREEN}Archive complete.{Color.END}")
 
@@ -1224,13 +1237,20 @@ def run_archive(auto=False):
 
     load_completed_meeting_ids()
 
+    # Interactive: optionally require per-file approval before downloading.
+    confirm_each = False
+    if not auto:
+        confirm_each = input(
+            "\nAsk for permission before downloading each file from Zoom? (y/n): "
+        ).strip().lower() == "y"
+
     # Interactive: choose between the plan-based sweep and a targeted user+range.
     if not auto:
         print("\nArchive mode:")
         print("  1. Keep usage under 70% of plan (all users, computed cutoff)")
         print("  2. A specific user and time range")
         if (input("Enter choice (1-2) [1]: ").strip() or "1") == "2":
-            _archive_specific_user(drive_service)
+            _archive_specific_user(drive_service, confirm_each)
             return
 
     archive_before = archive_planner(auto=auto)
@@ -1268,7 +1288,8 @@ def run_archive(auto=False):
     print(f"{Color.BOLD}Getting user accounts...{Color.END}")
     users = get_users()
     download_recordings_for_users(
-        users, drive_service, delete_after=delete_after, recheck_drive=True
+        users, drive_service, delete_after=delete_after, recheck_drive=True,
+        confirm_each=confirm_each
     )
     print(f"\n{Color.GREEN}Archive complete.{Color.END}")
 
