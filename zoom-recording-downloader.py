@@ -650,8 +650,10 @@ def drive_file_exists(drive_service, folder, filename):
 
 def note_drive_upload(folder, filename):
     """ Record that a file is now present in Drive, keeping cached lookups correct
-        after an upload. """
+        after an upload. Persisted immediately so an interrupted run never leaves
+        an uploaded file uncached. """
     DRIVE_LOOKUP_CACHE[f"{folder}|{filename}"] = True
+    save_drive_cache()
     print(
         f"{Color.DARK_CYAN}[drive cache] updated — {filename} "
         f"marked present after upload{Color.END}"
