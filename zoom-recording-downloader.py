@@ -758,6 +758,29 @@ def delete_cloud_recording(meeting_uuid):
     return False, f"HTTP {response.status_code}: {message}"
 
 
+def _recording_day(recording):
+    """ Return the local calendar date of a recording's start time, or None if it
+        can't be parsed. Used to group archive progress by day. """
+    try:
+        return (
+            parser.parse(recording.get("start_time", ""))
+            .replace(tzinfo=timezone.utc)
+            .astimezone(MEETING_TIMEZONE)
+            .date()
+        )
+    except (ValueError, OverflowError, TypeError):
+        return None
+
+
+def _print_archive_progress(email, day):
+    """ Emit a one-line progress marker once a user's day has been fully archived,
+        naming the user and the most recent date incorporated. """
+    print(
+        f"{Color.GREEN}>>> Archive progress: completed {email} "
+        f"through {day}{Color.END}"
+    )
+
+
 def download_recordings_for_users(users, drive_service, delete_after=False, recheck_drive=False):
     """ Download (and optionally upload to Google Drive) every recording for the
         given users within the globally configured date range. When delete_after
@@ -776,10 +799,20 @@ def download_recordings_for_users(users, drive_service, delete_after=False, rech
         print(f"\n{Color.BOLD}Getting recording list for {userInfo}{Color.END}")
 
         recordings = list_recordings(user_id)
+        recordings.sort(key=lambda r: r.get("start_time", ""))
         total_count = len(recordings)
         print(f"==> Found {total_count} recordings")
 
+        current_day = None
+
         for index, recording in enumerate(recordings):
+            rec_day = _recording_day(recording)
+            if rec_day is not None:
+                # A change of day means the previous day is fully processed.
+                if current_day is not None and rec_day != current_day:
+                    _print_archive_progress(email, current_day)
+                current_day = rec_day
+
             try:
                 meeting_uuid = recording["uuid"]
 
@@ -868,6 +901,10 @@ def download_recordings_for_users(users, drive_service, delete_after=False, rech
                     print(f"    > {Color.YELLOW}Removed from Zoom (moved to trash){Color.END}")
                 else:
                     print(f"{Color.RED}### Failed to delete recording from Zoom - {message}{Color.END}")
+
+        # All recordings for this user processed; flush the final day's progress.
+        if current_day is not None:
+            _print_archive_progress(email, current_day)
 
 
 def run_archive(auto=False):
@@ -1000,19 +1037,20 @@ def dry_run_archive():
         )
         print(f"\n{Color.BOLD}Checking {user_info}{Color.END}")
         recordings = list_recordings(user_id)
+        recordings.sort(key=lambda r: r.get("start_time", ""))
         print(f"==> {len(recordings)} recording(s) in range")
 
+        current_day = None
+
         for recording in recordings:
-            start_time = recording.get("start_time", "")
-            try:
-                meeting_local = (
-                    parser.parse(start_time)
-                    .replace(tzinfo=timezone.utc)
-                    .astimezone(MEETING_TIMEZONE)
-                )
-                month_key = meeting_local.strftime("%Y-%m")
-            except (ValueError, OverflowError, TypeError):
-                month_key = "unknown"
+            rec_day = _recording_day(recording)
+            if rec_day is not None:
+                # A change of day means the previous day is fully processed.
+                if current_day is not None and rec_day != current_day:
+                    _print_archive_progress(email, current_day)
+                current_day = rec_day
+
+            month_key = rec_day.strftime("%Y-%m") if rec_day is not None else "unknown"
 
             for file_extension, recording_id, recording_type, size in _iter_recording_files(recording):
                 params = {
@@ -1046,6 +1084,10 @@ def dry_run_archive():
                 else:
                     bucket["bytes"] += size
                     grand_bytes += size
+
+        # All recordings for this user processed; flush the final day's progress.
+        if current_day is not None:
+            _print_archive_progress(email, current_day)
 
     today = datetime.now(timezone.utc).date()
     csv_path = f"archive-{today}.run.log.csv"
