@@ -1164,6 +1164,38 @@ def download_recordings_for_users(users, drive_service, delete_after=False, rech
         save_drive_cache()
 
 
+def _archive_specific_user(drive_service):
+    """ Option-4 sub-mode: archive one chosen user's recordings within an entered
+        time range, rather than the plan-based cutoff across all users. Google Drive
+        and the caches are already initialized by run_archive. """
+    global RECORDING_START_DATE, RECORDING_END_DATE
+
+    print(f"{Color.BOLD}Getting user accounts...{Color.END}")
+    users = get_users()
+    email, user_id, first_name, last_name = pick_user(users)
+
+    input_date_range()
+
+    print(
+        f"\n{Color.RED}After a successful upload, recordings can be removed from Zoom to free "
+        f"space.{Color.END}\nThey are moved to the Zoom trash (recoverable for ~30 days), "
+        f"not permanently deleted."
+    )
+    delete_after = input(
+        "Delete from Zoom after successful upload? Type 'DELETE' to confirm: "
+    ).strip() == "DELETE"
+
+    print(
+        f"\n{Color.BOLD}Archiving {email} from {RECORDING_START_DATE.date()} "
+        f"to {RECORDING_END_DATE.date()}{Color.END}"
+    )
+    download_recordings_for_users(
+        [(email, user_id, first_name, last_name)], drive_service,
+        delete_after=delete_after, recheck_drive=True
+    )
+    print(f"\n{Color.GREEN}Archive complete.{Color.END}")
+
+
 def run_archive(auto=False):
     """ Plan and execute archiving of old cloud recordings to Google Drive so
         that Zoom usage stays under 70% of the storage plan.
@@ -1191,6 +1223,15 @@ def run_archive(auto=False):
         configure_caches(interactive=True)
 
     load_completed_meeting_ids()
+
+    # Interactive: choose between the plan-based sweep and a targeted user+range.
+    if not auto:
+        print("\nArchive mode:")
+        print("  1. Keep usage under 70% of plan (all users, computed cutoff)")
+        print("  2. A specific user and time range")
+        if (input("Enter choice (1-2) [1]: ").strip() or "1") == "2":
+            _archive_specific_user(drive_service)
+            return
 
     archive_before = archive_planner(auto=auto)
     if not archive_before:
