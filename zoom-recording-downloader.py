@@ -291,6 +291,10 @@ def list_recordings(email, rec_start_date=None, rec_end_date=None):
     for start, end in per_delta(rec_start_date, rec_end_date, timedelta(days=30)):
         cache_key = f"{email}|{start.isoformat()}|{end.isoformat()}"
         if USE_ZOOM_CACHE and cache_key in ZOOM_RECORDINGS_CACHE:
+            print(
+                f"{Color.DARK_CYAN}[zoom cache] hit — {email} "
+                f"{start.date()}..{end.date()} (no Zoom API call){Color.END}"
+            )
             recordings.extend(ZOOM_RECORDINGS_CACHE[cache_key])
             continue
 
@@ -306,6 +310,11 @@ def list_recordings(email, rec_start_date=None, rec_end_date=None):
             recordings.extend(meetings)
             ZOOM_RECORDINGS_CACHE[cache_key] = meetings
             fetched_new = True
+            reason = "miss" if USE_ZOOM_CACHE else "disabled"
+            print(
+                f"{Color.DARK_CYAN}[zoom cache] {reason} — {email} "
+                f"{start.date()}..{end.date()}: called Zoom API, cache updated{Color.END}"
+            )
         else:
             print(f"No 'meetings' key found in response for {email} from {start} to {end}")
 
@@ -523,9 +532,18 @@ def drive_file_exists(drive_service, folder, filename):
         this run or a future one — can skip the Drive round-trip. """
     key = f"{folder}|{filename}"
     if USE_DRIVE_CACHE and key in DRIVE_LOOKUP_CACHE:
+        print(
+            f"{Color.DARK_CYAN}[drive cache] hit — {filename} "
+            f"(no Drive API call){Color.END}"
+        )
         return DRIVE_LOOKUP_CACHE[key]
     exists = drive_service.file_exists(folder, filename)
     DRIVE_LOOKUP_CACHE[key] = exists
+    reason = "miss" if USE_DRIVE_CACHE else "disabled"
+    print(
+        f"{Color.DARK_CYAN}[drive cache] {reason} — {filename}: "
+        f"called Drive API, cache updated{Color.END}"
+    )
     return exists
 
 
@@ -533,6 +551,10 @@ def note_drive_upload(folder, filename):
     """ Record that a file is now present in Drive, keeping cached lookups correct
         after an upload. """
     DRIVE_LOOKUP_CACHE[f"{folder}|{filename}"] = True
+    print(
+        f"{Color.DARK_CYAN}[drive cache] updated — {filename} "
+        f"marked present after upload{Color.END}"
+    )
 
 
 def load_usage_cache():
