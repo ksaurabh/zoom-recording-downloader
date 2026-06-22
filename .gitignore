@@ -51,3 +51,7 @@ archive-settings.json
 
 # Ignore dry-run archive reports
 archive-*.run.log.csv
+
+# Ignore lookup caches
+zoom-recordings-cache.json
+drive-lookup-cache.json

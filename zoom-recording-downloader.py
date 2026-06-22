@@ -85,7 +85,16 @@ DOWNLOAD_DIRECTORY = config("Storage", "download_dir", 'downloads')
 COMPLETED_MEETING_IDS_LOG = config("Storage", "completed_log", 'completed-downloads.log')
 USAGE_CACHE_FILE = config("Storage", "usage_cache", 'usage-cache.json')
 ARCHIVE_SETTINGS_FILE = config("Storage", "archive_settings", 'archive-settings.json')
+ZOOM_CACHE_FILE = config("Storage", "zoom_cache", 'zoom-recordings-cache.json')
+DRIVE_CACHE_FILE = config("Storage", "drive_cache", 'drive-lookup-cache.json')
 COMPLETED_MEETING_IDS = set()
+
+# Lookup caches (loaded by main()/configure_caches). USE_* gates whether we read
+# from them; they are always *written* so later runs can reuse the answers.
+ZOOM_RECORDINGS_CACHE = {}
+DRIVE_LOOKUP_CACHE = {}
+USE_ZOOM_CACHE = False
+USE_DRIVE_CACHE = False
 
 MEETING_TIMEZONE = ZoneInfo(config("Recordings", "timezone", 'UTC'))
 MEETING_STRFTIME = config("Recordings", "strftime", '%Y.%m.%d - %I.%M %p UTC')
@@ -274,8 +283,14 @@ def list_recordings(email, rec_start_date=None, rec_end_date=None):
     rec_end_date = rec_end_date or RECORDING_END_DATE
 
     recordings = []
+    fetched_new = False
 
     for start, end in per_delta(rec_start_date, rec_end_date, timedelta(days=30)):
+        cache_key = f"{email}|{start.isoformat()}|{end.isoformat()}"
+        if USE_ZOOM_CACHE and cache_key in ZOOM_RECORDINGS_CACHE:
+            recordings.extend(ZOOM_RECORDINGS_CACHE[cache_key])
+            continue
+
         post_data = get_recordings(email, 300, start, end)
         response = requests.get(
             url=f"https://api.zoom.us/v2/users/{email}/recordings",
@@ -284,9 +299,15 @@ def list_recordings(email, rec_start_date=None, rec_end_date=None):
         )
         recordings_data = response.json()
         if "meetings" in recordings_data:
-            recordings.extend(recordings_data["meetings"])
+            meetings = recordings_data["meetings"]
+            recordings.extend(meetings)
+            ZOOM_RECORDINGS_CACHE[cache_key] = meetings
+            fetched_new = True
         else:
             print(f"No 'meetings' key found in response for {email} from {start} to {end}")
+
+    if fetched_new:
+        save_zoom_cache()
 
     return recordings
 
@@ -432,6 +453,83 @@ def report_cloud_usage():
 
     result = compute_usage(users, RECORDING_START_DATE, RECORDING_END_DATE)
     print_usage_table(result)
+
+
+def load_zoom_cache():
+    try:
+        with open(ZOOM_CACHE_FILE, "r", encoding="utf-8") as fd:
+            return json.load(fd)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def save_zoom_cache():
+    with open(ZOOM_CACHE_FILE, "w", encoding="utf-8") as fd:
+        json.dump(ZOOM_RECORDINGS_CACHE, fd)
+
+
+def load_drive_cache():
+    try:
+        with open(DRIVE_CACHE_FILE, "r", encoding="utf-8") as fd:
+            return json.load(fd)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def save_drive_cache():
+    with open(DRIVE_CACHE_FILE, "w", encoding="utf-8") as fd:
+        json.dump(DRIVE_LOOKUP_CACHE, fd)
+
+
+def configure_caches(interactive=True, use_zoom=True, use_drive=False):
+    """ Load the Zoom-recordings and Google-Drive lookup caches and decide whether
+        to read from them. When interactive, the operator is asked about each cache
+        separately; otherwise the use_zoom/use_drive defaults apply (used by the
+        unattended --auto / dry-run paths). Either way the caches are always
+        *updated* with fresh answers, so the next run can reuse them. """
+    global ZOOM_RECORDINGS_CACHE, DRIVE_LOOKUP_CACHE, USE_ZOOM_CACHE, USE_DRIVE_CACHE
+    ZOOM_RECORDINGS_CACHE = load_zoom_cache()
+    DRIVE_LOOKUP_CACHE = load_drive_cache()
+
+    if interactive:
+        USE_ZOOM_CACHE = input(
+            f"Use cached Zoom recording data when available? "
+            f"({len(ZOOM_RECORDINGS_CACHE)} cached) (y/n): "
+        ).strip().lower() == "y"
+        USE_DRIVE_CACHE = input(
+            f"Use cached Google Drive lookups when available? "
+            f"({len(DRIVE_LOOKUP_CACHE)} cached) (y/n): "
+        ).strip().lower() == "y"
+    else:
+        USE_ZOOM_CACHE = use_zoom
+        USE_DRIVE_CACHE = use_drive
+
+    print(
+        f"{Color.BOLD}Cache:{Color.END} Zoom recordings "
+        f"{Color.GREEN if USE_ZOOM_CACHE else Color.YELLOW}"
+        f"{'ON' if USE_ZOOM_CACHE else 'OFF'}{Color.END}, Drive lookups "
+        f"{Color.GREEN if USE_DRIVE_CACHE else Color.YELLOW}"
+        f"{'ON' if USE_DRIVE_CACHE else 'OFF'}{Color.END} "
+        f"(both are refreshed when not used)"
+    )
+
+
+def drive_file_exists(drive_service, folder, filename):
+    """ Whether a file exists in Google Drive, consulting the lookup cache first
+        when caching is enabled. The result is always stored so a later check —
+        this run or a future one — can skip the Drive round-trip. """
+    key = f"{folder}|{filename}"
+    if USE_DRIVE_CACHE and key in DRIVE_LOOKUP_CACHE:
+        return DRIVE_LOOKUP_CACHE[key]
+    exists = drive_service.file_exists(folder, filename)
+    DRIVE_LOOKUP_CACHE[key] = exists
+    return exists
+
+
+def note_drive_upload(folder, filename):
+    """ Record that a file is now present in Drive, keeping cached lookups correct
+        after an upload. """
+    DRIVE_LOOKUP_CACHE[f"{folder}|{filename}"] = True
 
 
 def load_usage_cache():
@@ -855,7 +953,7 @@ def download_recordings_for_users(users, drive_service, delete_after=False, rech
                     print(f"    > Checking if file exists...{sanitized_filename} in folder {folder_name}")
                     found_file = False
                     try:
-                        found_file = drive_service.file_exists(folder_name, sanitized_filename)  # Check if file exists
+                        found_file = drive_file_exists(drive_service, folder_name, sanitized_filename)  # Check if file exists
                     except Exception as e:
                         print(f"{Color.RED}{str(e)}{Color.END}"  )
                         print(f"FAILED: Checking if file exists...{sanitized_filename} in folder {folder_name}")
@@ -872,6 +970,8 @@ def download_recordings_for_users(users, drive_service, delete_after=False, rech
                             print(f"    > Uploading to Google Drive...")
                             print("Google Drive Folder name: %s. full file name: %s, sanitized_file_name: %s" % (folder_name, full_filename, sanitized_filename))
                             success = drive_service.upload_file(full_filename, folder_name, sanitized_filename)
+                            if success:
+                                note_drive_upload(folder_name, sanitized_filename)
                             if success and os.path.exists(full_filename):
                                 os.remove(full_filename)
                                 if not os.listdir(sanitized_download_dir):
@@ -905,6 +1005,7 @@ def download_recordings_for_users(users, drive_service, delete_after=False, rech
         # All recordings for this user processed; flush the final day's progress.
         if current_day is not None:
             _print_archive_progress(email, current_day)
+        save_drive_cache()
 
 
 def run_archive(auto=False):
@@ -925,6 +1026,13 @@ def run_archive(auto=False):
         print(f"{Color.RED}### Google Drive is not available; cannot archive.{Color.END}")
         return
     GDRIVE_ENABLED = True
+
+    # In auto mode read the Zoom cache (past data is immutable) but always verify
+    # Drive fresh, since auto deletes from Zoom and must not trust a stale lookup.
+    if auto:
+        configure_caches(interactive=False, use_zoom=True, use_drive=False)
+    else:
+        configure_caches(interactive=True)
 
     load_completed_meeting_ids()
 
@@ -1014,6 +1122,9 @@ def dry_run_archive():
         return
     GDRIVE_ENABLED = True
 
+    # Dry run is read-only, so it is safe to use both caches and stay unattended.
+    configure_caches(interactive=False, use_zoom=True, use_drive=True)
+
     archive_before = archive_planner(auto=True)
     if not archive_before:
         return
@@ -1064,7 +1175,7 @@ def dry_run_archive():
                 sanitized_filename = path_validate.sanitize_filename(filename)
 
                 try:
-                    exists = drive_service.file_exists(folder_name, sanitized_filename)
+                    exists = drive_file_exists(drive_service, folder_name, sanitized_filename)
                 except Exception as e:
                     # Don't silently drop a file we couldn't verify; count it as
                     # one that would be downloaded so the estimate stays on the
@@ -1088,6 +1199,7 @@ def dry_run_archive():
         # All recordings for this user processed; flush the final day's progress.
         if current_day is not None:
             _print_archive_progress(email, current_day)
+        save_drive_cache()
 
     today = datetime.now(timezone.utc).date()
     csv_path = f"archive-{today}.run.log.csv"
@@ -1143,7 +1255,7 @@ def recording_files_in_drive(drive_service, email, recording):
         }
         filename, folder_name = format_filename(params)
         sanitized_filename = path_validate.sanitize_filename(filename)
-        if not drive_service.file_exists(folder_name, sanitized_filename):
+        if not drive_file_exists(drive_service, folder_name, sanitized_filename):
             print(f"  {Color.RED}Missing in Drive:{Color.END} {sanitized_filename}")
             all_present = False
     return all_present, len(downloads)
@@ -1254,6 +1366,8 @@ def check_recordings_in_drive():
         return
     GDRIVE_ENABLED = True
 
+    configure_caches(interactive=True)
+
     print(f"{Color.BOLD}Getting user accounts...{Color.END}")
     users = get_users()
     email, user_id, first_name, last_name = pick_user(users)
@@ -1294,7 +1408,7 @@ def check_recordings_in_drive():
                 }
                 filename, folder_name = format_filename(params)
                 sanitized_filename = path_validate.sanitize_filename(filename)
-                exists = drive_service.file_exists(folder_name, sanitized_filename)
+                exists = drive_file_exists(drive_service, folder_name, sanitized_filename)
 
                 total_files += 1
                 if exists:
@@ -1309,6 +1423,7 @@ def check_recordings_in_drive():
         print(f"Files found in Zoom           : {total_files}")
         print(f"Present in Google Drive       : {present_files}")
         print(f"Missing from Google Drive     : {total_files - present_files}")
+        save_drive_cache()
 
         if input(
             f"\nTest {email} against a different time range? (y/n): "
@@ -1369,6 +1484,13 @@ def main():
 
         {Color.END}
     """)
+
+    # Preload lookup caches so every operation merges into (rather than clobbers)
+    # the on-disk caches. Whether a cache is *read* is decided per operation by
+    # configure_caches; here we just make sure existing entries aren't lost.
+    global ZOOM_RECORDINGS_CACHE, DRIVE_LOOKUP_CACHE
+    ZOOM_RECORDINGS_CACHE = load_zoom_cache()
+    DRIVE_LOOKUP_CACHE = load_drive_cache()
 
     # Non-interactive dry run: simulate the archive (option 8) and write the CSV
     if "--dry-run" in system.argv:
@@ -1445,6 +1567,8 @@ def main():
             GDRIVE_ENABLED = False
 
     prompt_date_range()
+
+    configure_caches(interactive=True)
 
     load_access_token()
     load_completed_meeting_ids()
