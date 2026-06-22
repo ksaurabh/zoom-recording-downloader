@@ -118,56 +118,57 @@ class GoogleDriveClient:
                         return self._handle_upload_with_refresh(request)
             raise
 
+    @staticmethod
+    def _escape_query_value(value):
+        """Escape a literal for use inside a Drive query string ('...')."""
+        return value.replace("\\", "\\\\").replace("'", "\\'")
+
     def file_exists(self, folder_path, file_name):
+        """Return True if a file with this exact name exists (untrashed) under the
+           given folder path. Uses an exact name= match scoped to the parent folder
+           rather than a fullText search, which gave false negatives when the name
+           (or an id within it) also appeared inside other files' content. Handles
+           duplicate folders by searching every matching branch."""
         print(f"Checking for file {file_name} in folder {folder_path}")
-        folder_id = self.root_folder_id
+
+        # Resolve the folder path, collecting ALL folders that match at each level
+        # (there may be duplicates created by earlier runs).
+        parent_ids = [self.root_folder_id] if self.root_folder_id else [None]
         for folder in folder_path.split(os.sep):
             if not folder:
                 continue
-
-        
-            query = f"name='{folder}' and mimeType='application/vnd.google-apps.folder'"
-
-            if folder_id:
-                query += f" and '{folder_id}' in parents"
-            print(f"query: {query}")
-
-            results=self.service.files().list(
-                q=query,
-                spaces='drive',
-                fields='files(id, name)'
-            ).execute()
-            files = results.get('files', [])
-            if not files:
+            safe_folder = self._escape_query_value(folder)
+            next_ids = []
+            for parent_id in parent_ids:
+                query = (
+                    f"name = '{safe_folder}' "
+                    f"and mimeType = 'application/vnd.google-apps.folder' "
+                    f"and trashed = false"
+                )
+                if parent_id:
+                    query += f" and '{parent_id}' in parents"
+                results = self.service.files().list(
+                    q=query, spaces='drive', fields='files(id)'
+                ).execute()
+                next_ids.extend(f['id'] for f in results.get('files', []))
+            if not next_ids:
+                print(f"Found file: False (folder '{folder}' not found)")
                 return False
-            folder_id = files[0]['id']
-            print(f"Found folder {folder} with ID {folder_id}")
-            
-        
-        # Regular expression to extract the order ID
-        tokens = file_name.split()
-        largest_token = max(tokens, key=len)
-        print(f"largest_token: {largest_token}")
-        query = f" fullText contains '{largest_token}' and trashed = false and '{folder_id}' in parents"
-        print(f"query: {query}")
-        results = self.service.files().list(
-            q=query,
-            spaces='drive',
-            fields='files(id, name)'
-        ).execute()
-        files = results.get('files', [])
+            parent_ids = next_ids
 
-        found_file = False
-        if len(files) > 0:
-            found_file_name = files[0]['name']
-            print(f"       Found file: {found_file_name}")
-            print(f"Searched for file: {file_name}")
-            found_file = found_file_name == file_name
-        
-        print(f"Found file: {found_file}")
-        print("")
+        # Look for the exact file name in any of the resolved folders.
+        safe_name = self._escape_query_value(file_name)
+        for parent_id in parent_ids:
+            query = f"name = '{safe_name}' and trashed = false and '{parent_id}' in parents"
+            results = self.service.files().list(
+                q=query, spaces='drive', fields='files(id, name)'
+            ).execute()
+            if results.get('files'):
+                print("Found file: True")
+                return True
 
-        return found_file
+        print("Found file: False")
+        return False
         
     def create_folder(self, folder_name, parent_id=None):
         """Create a folder in Google Drive and return its ID."""
