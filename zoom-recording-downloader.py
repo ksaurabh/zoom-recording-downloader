@@ -1301,6 +1301,8 @@ def dry_run_archive(interactive=True):
     grand_files = 0
     grand_bytes = 0
     grand_unknown = 0
+    grand_found_files = 0
+    grand_found_bytes = 0
     # Running totals across the run (grand_files is the missing count).
     checked = 0
     found = 0
@@ -1350,11 +1352,19 @@ def dry_run_archive(interactive=True):
                     exists = False
 
                 checked += 1
+                bucket = groups.setdefault(
+                    (email, month_key),
+                    {"files": 0, "bytes": 0, "unknown": 0, "found_files": 0, "found_bytes": 0},
+                )
+
                 if exists:
                     found += 1
+                    bucket["found_files"] += 1
+                    bucket["found_bytes"] += size or 0
+                    grand_found_files += 1
+                    grand_found_bytes += size or 0
                     continue
 
-                bucket = groups.setdefault((email, month_key), {"files": 0, "bytes": 0, "unknown": 0})
                 bucket["files"] += 1
                 grand_files += 1
                 if size is None:
@@ -1376,34 +1386,45 @@ def dry_run_archive(interactive=True):
         writer.writerow([
             "email", "month", "files_to_download",
             "known_size_bytes", "known_size_human", "files_with_unknown_size",
+            "files_on_drive", "on_drive_bytes", "on_drive_human",
         ])
         for (email, month_key) in sorted(groups):
             b = groups[(email, month_key)]
             writer.writerow([
                 email, month_key, b["files"],
                 b["bytes"], format_bytes(b["bytes"]), b["unknown"],
+                b["found_files"], b["found_bytes"], format_bytes(b["found_bytes"]),
             ])
         writer.writerow([])
         writer.writerow([
             "TOTAL", "", grand_files,
             grand_bytes, format_bytes(grand_bytes), grand_unknown,
+            grand_found_files, grand_found_bytes, format_bytes(grand_found_bytes),
         ])
 
-    header = f"{'Email':<34}{'Month':>9}{'Files':>8}{'Known size':>14}{'Unknown':>9}"
+    header = (
+        f"{'Email':<34}{'Month':>9}{'Files':>8}{'Known size':>14}"
+        f"{'Unknown':>9}{'On Drive':>14}"
+    )
     print(f"\n{Color.BOLD}=== Dry run: what would be downloaded/uploaded ==={Color.END}")
     print(f"{Color.BOLD}{header}{Color.END}")
     print("-" * len(header))
     for (email, month_key) in sorted(groups):
         b = groups[(email, month_key)]
-        print(f"{email:<34}{month_key:>9}{b['files']:>8}{format_bytes(b['bytes']):>14}{b['unknown']:>9}")
+        print(
+            f"{email:<34}{month_key:>9}{b['files']:>8}{format_bytes(b['bytes']):>14}"
+            f"{b['unknown']:>9}{format_bytes(b['found_bytes']):>14}"
+        )
     print("-" * len(header))
     print(
         f"{Color.BOLD}{'TOTAL':<34}{'':>9}{grand_files:>8}"
-        f"{format_bytes(grand_bytes):>14}{grand_unknown:>9}{Color.END}"
+        f"{format_bytes(grand_bytes):>14}{grand_unknown:>9}"
+        f"{format_bytes(grand_found_bytes):>14}{Color.END}"
     )
 
     print(f"\nFiles to download : {grand_files} ({grand_unknown} with size unknown to Zoom)")
     print(f"Estimated volume  : {format_bytes(grand_bytes)} (sum of known file sizes)")
+    print(f"Already on Drive  : {grand_found_files} files, {format_bytes(grand_found_bytes)}")
     print(f"\n{Color.GREEN}Wrote per-user, per-month breakdown to {csv_path}{Color.END}")
     print(f"{Color.YELLOW}Dry run only — nothing was downloaded, uploaded, or deleted.{Color.END}")
 
