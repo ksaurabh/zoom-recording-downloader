@@ -1008,16 +1008,18 @@ def format_elapsed(seconds):
     return f"{secs}s"
 
 
-def _print_archive_progress(email, day):
+def _print_archive_progress(email, day, checked, found, missing):
     """ Emit a one-line progress marker once a user's day has been fully archived,
-        naming the user, the most recent date incorporated, and how long the run
-        has been going. """
+        naming the user, the most recent date incorporated, how long the run has
+        been going, and the running totals of Zoom files checked, found already in
+        Google Drive, and missing from it. """
     elapsed = ""
     if ARCHIVE_START_TS is not None:
         elapsed = f" [running {format_elapsed(time.time() - ARCHIVE_START_TS)}]"
     print(
         f"{Color.GREEN}>>> Archive progress: completed {email} "
-        f"through {day}{elapsed}{Color.END}"
+        f"through {day}{elapsed} | Zoom files checked {checked}, "
+        f"found in Drive {found}, missing {missing}{Color.END}"
     )
 
 
@@ -1034,6 +1036,9 @@ def download_recordings_for_users(users, drive_service, delete_after=False, rech
     """
     global ARCHIVE_START_TS
     ARCHIVE_START_TS = time.time()
+
+    # Running totals across the whole run, shown on each progress line.
+    checked = found = missing = 0
 
     for email, user_id, first_name, last_name in users:
         userInfo = (
@@ -1053,7 +1058,7 @@ def download_recordings_for_users(users, drive_service, delete_after=False, rech
             if rec_day is not None:
                 # A change of day means the previous day is fully processed.
                 if current_day is not None and rec_day != current_day:
-                    _print_archive_progress(email, current_day)
+                    _print_archive_progress(email, current_day, checked, found, missing)
                 current_day = rec_day
 
             try:
@@ -1096,19 +1101,23 @@ def download_recordings_for_users(users, drive_service, delete_after=False, rech
 
                     # Check if file exists
                     print(f"    > Checking if file exists...{sanitized_filename} in folder {folder_name}")
+                    checked += 1
                     found_file = False
                     try:
                         found_file = drive_file_exists(drive_service, folder_name, sanitized_filename)  # Check if file exists
                     except Exception as e:
                         print(f"{Color.RED}{str(e)}{Color.END}"  )
                         print(f"FAILED: Checking if file exists...{sanitized_filename} in folder {folder_name}")
+                        missing += 1  # couldn't confirm in Drive; treat as not present
                         all_uploaded = False
                         continue
 
                     if found_file:
+                        found += 1
                         print(f"    > Skipping existing file: {sanitized_filename}")
                         continue
 
+                    missing += 1
                     print(f"    > Downloading {filename}")
                     if download_recording(download_url, email, filename, folder_name):
                         if GDRIVE_ENABLED and drive_service:
@@ -1149,7 +1158,7 @@ def download_recordings_for_users(users, drive_service, delete_after=False, rech
 
         # All recordings for this user processed; flush the final day's progress.
         if current_day is not None:
-            _print_archive_progress(email, current_day)
+            _print_archive_progress(email, current_day, checked, found, missing)
         save_drive_cache()
 
 
@@ -1292,6 +1301,9 @@ def dry_run_archive(interactive=True):
     grand_files = 0
     grand_bytes = 0
     grand_unknown = 0
+    # Running totals across the run (grand_files is the missing count).
+    checked = 0
+    found = 0
 
     for email, user_id, first_name, last_name in users:
         user_info = (
@@ -1312,7 +1324,7 @@ def dry_run_archive(interactive=True):
             if rec_day is not None:
                 # A change of day means the previous day is fully processed.
                 if current_day is not None and rec_day != current_day:
-                    _print_archive_progress(email, current_day)
+                    _print_archive_progress(email, current_day, checked, found, grand_files)
                 current_day = rec_day
 
             month_key = rec_day.strftime("%Y-%m") if rec_day is not None else "unknown"
@@ -1337,7 +1349,9 @@ def dry_run_archive(interactive=True):
                     print(f"  {Color.RED}Could not check {sanitized_filename}: {e}{Color.END}")
                     exists = False
 
+                checked += 1
                 if exists:
+                    found += 1
                     continue
 
                 bucket = groups.setdefault((email, month_key), {"files": 0, "bytes": 0, "unknown": 0})
@@ -1352,7 +1366,7 @@ def dry_run_archive(interactive=True):
 
         # All recordings for this user processed; flush the final day's progress.
         if current_day is not None:
-            _print_archive_progress(email, current_day)
+            _print_archive_progress(email, current_day, checked, found, grand_files)
         save_drive_cache()
 
     today = datetime.now(timezone.utc).date()
