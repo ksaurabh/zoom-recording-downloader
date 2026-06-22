@@ -87,6 +87,8 @@ USAGE_CACHE_FILE = config("Storage", "usage_cache", 'usage-cache.json')
 ARCHIVE_SETTINGS_FILE = config("Storage", "archive_settings", 'archive-settings.json')
 ZOOM_CACHE_FILE = config("Storage", "zoom_cache", 'zoom-recordings-cache.json')
 DRIVE_CACHE_FILE = config("Storage", "drive_cache", 'drive-lookup-cache.json')
+LOG_FILE = config("Storage", "log_file", 'zoom-downloader.log')
+LOG_MAX_AGE_HOURS = int(config("Storage", "log_max_age_hours", 24))
 COMPLETED_MEETING_IDS = set()
 
 # Lookup caches (loaded by main()/configure_caches). USE_* gates whether we read
@@ -98,6 +100,10 @@ USE_DRIVE_CACHE = False
 
 # Wall-clock start of the current archive/dry-run, for elapsed-time progress.
 ARCHIVE_START_TS = None
+
+# Original streams, captured before stdout/stderr are tee'd to the log file.
+ORIGINAL_STDOUT = None
+ORIGINAL_STDERR = None
 
 MEETING_TIMEZONE = ZoneInfo(config("Recordings", "timezone", 'UTC'))
 MEETING_STRFTIME = config("Recordings", "strftime", '%Y.%m.%d - %I.%M %p UTC')
@@ -111,6 +117,98 @@ GDRIVE_ROOT_FOLDER = config("GoogleDrive", "root_folder_name", "zoom-recording-d
 GDRIVE_RETRY_DELAY = int(config("GoogleDrive", "retry_delay", "5"))
 GDRIVE_MAX_RETRIES = int(config("GoogleDrive", "max_retries", "3"))
 GDRIVE_FAILED_LOG = config("GoogleDrive", "failed_log", "failed-uploads.log")
+
+
+_ANSI_RE = regex.compile(r"\x1b\[[0-9;]*m")
+
+
+class _Tee:
+    """ Write the same data to several streams (console + log file). """
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data):
+        for stream in self.streams:
+            try:
+                stream.write(data)
+            except Exception:
+                pass
+
+    def flush(self):
+        for stream in self.streams:
+            try:
+                stream.flush()
+            except Exception:
+                pass
+
+
+class _LogFile:
+    """ Wrap the log file object, stripping ANSI color codes before writing so the
+        on-disk log stays plain text. """
+    def __init__(self, fd):
+        self.fd = fd
+
+    def write(self, data):
+        self.fd.write(_ANSI_RE.sub("", data))
+
+    def flush(self):
+        self.fd.flush()
+
+
+def _log_started_at(path):
+    """ Return the datetime recorded on the log's first line, or None. """
+    try:
+        with open(path, "r", encoding="utf-8") as fd:
+            first = fd.readline().strip()
+    except (FileNotFoundError, OSError):
+        return None
+    marker = "# log started: "
+    if first.startswith(marker):
+        try:
+            return parser.parse(first[len(marker):])
+        except (ValueError, OverflowError):
+            return None
+    return None
+
+
+def setup_logging():
+    """ Tee every stdout/stderr line to LOG_FILE so all output is captured. If the
+        existing log was started more than LOG_MAX_AGE_HOURS ago, it is first
+        rotated to a timestamped file and a fresh log is begun. """
+    global ORIGINAL_STDOUT, ORIGINAL_STDERR
+    now = datetime.now(timezone.utc)
+    rotated_to = None
+
+    if os.path.exists(LOG_FILE):
+        started = _log_started_at(LOG_FILE)
+        if started is None:
+            # No marker (older log) — fall back to the file's modification time.
+            started = datetime.fromtimestamp(os.path.getmtime(LOG_FILE), tz=timezone.utc)
+        if (now - started).total_seconds() >= LOG_MAX_AGE_HOURS * 3600:
+            base, ext = os.path.splitext(LOG_FILE)
+            rotated_to = f"{base}-{started.strftime('%Y%m%d-%H%M%S')}{ext}"
+            try:
+                os.replace(LOG_FILE, rotated_to)
+            except OSError:
+                rotated_to = None
+
+    new_log = not os.path.exists(LOG_FILE)
+    log_fd = open(LOG_FILE, "a", encoding="utf-8", buffering=1)
+    if new_log:
+        log_fd.write(f"# log started: {now.isoformat()}\n")
+
+    ORIGINAL_STDOUT = system.stdout
+    ORIGINAL_STDERR = system.stderr
+    system.stdout = _Tee(ORIGINAL_STDOUT, _LogFile(log_fd))
+    system.stderr = _Tee(ORIGINAL_STDERR, _LogFile(log_fd))
+
+    if rotated_to:
+        print(
+            f"{Color.DARK_CYAN}Previous log was older than {LOG_MAX_AGE_HOURS}h; "
+            f"rotated to {rotated_to}{Color.END}"
+        )
+    print(f"{Color.DARK_CYAN}Logging all output to {LOG_FILE}{Color.END}")
+
 
 def setup_google_drive(auto=False):
     """Initialize Google Drive client with OAuth authentication.
@@ -338,8 +436,11 @@ def download_recording(download_url, email, filename, folder_name):
     total_size = int(response.headers.get("content-length", 0))
     block_size = 32 * 1024  # 32 Kibibytes
 
-    # create TQDM progress bar
-    prog_bar = progress_bar.tqdm(dynamic_ncols=True, total=total_size, unit="iB", unit_scale=True)
+    # create TQDM progress bar (console only, so it doesn't bloat the log file)
+    prog_bar = progress_bar.tqdm(
+        dynamic_ncols=True, total=total_size, unit="iB", unit_scale=True,
+        file=ORIGINAL_STDERR
+    )
     try:
         with open(full_filename, "wb") as fd:
             for chunk in response.iter_content(block_size):
@@ -1510,6 +1611,9 @@ def handle_graceful_shutdown(signal_received, frame):
 def main():
     # clear the screen buffer
     os.system('cls' if os.name == 'nt' else 'clear')
+
+    # Capture all output to a rotating log file
+    setup_logging()
 
     # show the logo
     print(f"""
