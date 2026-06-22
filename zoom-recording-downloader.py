@@ -1199,7 +1199,10 @@ def dry_run_archive(interactive=True):
         print(f"\n{Color.BOLD}Checking {user_info}{Color.END}")
         recordings = list_recordings(user_id)
         recordings.sort(key=lambda r: r.get("start_time", ""))
-        print(f"==> {len(recordings)} recording(s) in range")
+        print(
+            f"==> {len(recordings)} recording(s) for {email} in range "
+            f"{RECORDING_START_DATE.date()} to {RECORDING_END_DATE.date()}"
+        )
 
         current_day = None
 
