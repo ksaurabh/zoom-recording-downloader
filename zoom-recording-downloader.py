@@ -2386,14 +2386,14 @@ def main():
     print("2. Report cloud recording usage by user account")
     print("3. Monthly cloud recording usage (cached)")
     print("4. Archive recordings to Google Drive (keep usage under 70% of plan)")
-    print("5. Delete a recording from Zoom by name (if archived in Google Drive)")
+    print("5. Archive recordings in a date range (all users)")
     print("6. Check a user's recordings against Google Drive")
     print("7. Monthly cloud recording usage (cached vs. now)")
     print("8. Dry run archive (no download/upload; report volume + CSV)")
     print("9. Report first N meetings missing from Google Drive")
     print("10. Import missing meetings (from option 9) and archive/delete from Zoom")
     print("11. Report recordings in a date range vs Google Drive")
-    print("12. Archive recordings in a date range (all users)")
+    print("12. Delete a recording from Zoom by name (if archived in Google Drive)")
     print("13. Clear the Zoom recordings cache")
     print("14. Export daily cloud recording usage to CSV")
     operation = input("Enter choice (1-14): ")
@@ -2421,7 +2421,7 @@ def main():
 
     if operation == "5":
         load_access_token()
-        delete_recording_by_name()
+        archive_date_range()
         return
 
     if operation == "7":
@@ -2456,7 +2456,7 @@ def main():
 
     if operation == "12":
         load_access_token()
-        archive_date_range()
+        delete_recording_by_name()
         return
 
     if operation == "13":
