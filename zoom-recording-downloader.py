@@ -892,7 +892,8 @@ def monthly_usage_cached_vs_now():
         if cached_entry:
             diff = now_size - cached_size
             sign = "+" if diff > 0 else ""
-            diff_str = "same" if diff == 0 else f"{sign}{format_bytes(diff)}"
+            # Always express the difference in GB with two decimals.
+            diff_str = "same" if diff == 0 else f"{sign}{diff / 1024 ** 3:.2f} GB"
         else:
             diff_str = "-"
 
