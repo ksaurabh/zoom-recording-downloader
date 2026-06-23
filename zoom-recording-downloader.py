@@ -1171,13 +1171,17 @@ def _print_archive_progress(email, day, checked, found, missing, freed_bytes=Non
     )
 
 
-def download_recordings_for_users(users, drive_service, delete_after=False, recheck_drive=False, confirm_each=False):
+def download_recordings_for_users(users, drive_service, delete_after=False, recheck_drive=False, confirm_each=False, day_outer=False):
     """ Download (and optionally upload to Google Drive) every recording for the
         given users within the globally configured date range, processing one
-        calendar day at a time per user: each day is fetched from Zoom, fully
-        archived, and checkpointed (progress line + cache save) before the next
-        day. When delete_after is set, a meeting's cloud recordings are moved to
-        the Zoom trash once all of its files have been uploaded successfully.
+        calendar day at a time: each day is fetched from Zoom, fully archived, and
+        checkpointed (progress line + cache save) before the next day. By default
+        it iterates per user (all of one user's days, then the next user); with
+        day_outer set it iterates day-outer instead — the oldest day for every
+        user, then the next day — so storage frees uniformly from the oldest date
+        across the whole account. When delete_after is set, a meeting's cloud
+        recordings are moved to the Zoom trash once all of its files have been
+        uploaded successfully.
 
         By default a meeting listed in completed-downloads.log is skipped without
         contacting Drive. When recheck_drive is set (used by archiving), that log
@@ -1311,6 +1315,30 @@ def download_recordings_for_users(users, drive_service, delete_after=False, rech
     range_start = RECORDING_START_DATE
     range_end = RECORDING_END_DATE
 
+    if day_outer:
+        # Day-outer: process the oldest day for every user, then the next day, so
+        # storage frees uniformly from the oldest date across the whole account.
+        day = range_start.date()
+        last_day = range_end.date()
+        print(
+            f"\n{Color.BOLD}Archiving all users one day at a time, oldest first "
+            f"({day} to {last_day}){Color.END}"
+        )
+        while day <= last_day:
+            for email, user_id, first_name, last_name in users:
+                recordings = list_recordings_for_day(user_id, day)
+                recordings.sort(key=lambda r: r.get("start_time", ""))
+                total_count = len(recordings)
+                if not total_count:
+                    continue
+                print(f"\n{Color.BOLD}{day} — {email}: {total_count} recording(s){Color.END}")
+                for index, recording in enumerate(recordings):
+                    process_recording(email, recording, index, total_count)
+                _print_archive_progress(email, day, checked, found, missing, freed_bytes)
+                save_drive_cache()
+            day += timedelta(days=1)
+        return
+
     for email, user_id, first_name, last_name in users:
         userInfo = (
             f"{first_name} {last_name} - {email}" if first_name and last_name else f"{email}"
@@ -1421,7 +1449,7 @@ def archive_date_range():
     )
     download_recordings_for_users(
         users, drive_service, delete_after=delete_after, recheck_drive=True,
-        confirm_each=confirm_each
+        confirm_each=confirm_each, day_outer=True
     )
     print(f"\n{Color.GREEN}Archive complete.{Color.END}")
 
