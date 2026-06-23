@@ -953,6 +953,28 @@ def save_last_check_range(start, end):
     save_archive_settings(settings)
 
 
+def load_last_daily_range():
+    """ Return (start, end) UTC datetimes saved from the last daily-usage export,
+        or None. """
+    saved = load_archive_settings().get("daily_usage_range")
+    if not saved:
+        return None
+    try:
+        start = parser.parse(saved["start"]).replace(tzinfo=timezone.utc)
+        end = parser.parse(saved["end"]).replace(tzinfo=timezone.utc)
+        return start, end
+    except (KeyError, ValueError, OverflowError):
+        return None
+
+
+def save_last_daily_range(start, end):
+    """ Persist the date range used by the daily-usage export so the next run
+        reuses it as the default. """
+    settings = load_archive_settings()
+    settings["daily_usage_range"] = {"start": str(start.date()), "end": str(end.date())}
+    save_archive_settings(settings)
+
+
 def prompt_plan(auto=False):
     """ Show the saved cloud storage plan (if any), let the user update it, and
         return the plan size in bytes. Plan is entered/stored in GB (GiB).
@@ -2085,7 +2107,7 @@ def report_recordings_vs_drive():
 def export_daily_usage():
     """ Option 14: export per-day cloud recording usage (summed across all users)
         for an entered date range to daily-usage-<timestamp>.csv. """
-    global USE_ZOOM_CACHE, ZOOM_RECORDINGS_CACHE
+    global USE_ZOOM_CACHE, ZOOM_RECORDINGS_CACHE, RECORDING_START_DATE, RECORDING_END_DATE
 
     print("\nThis exports per-day cloud recording usage (all users) to a CSV.")
     ZOOM_RECORDINGS_CACHE = load_zoom_cache()
@@ -2093,7 +2115,14 @@ def export_daily_usage():
         "Use cached Zoom recording data when available? (y/n): "
     ).strip().lower() == "y"
 
-    input_date_range()
+    # Default to the range used by the last export, if any.
+    last_range = load_last_daily_range()
+    if last_range:
+        RECORDING_START_DATE, RECORDING_END_DATE = last_range
+        prompt_date_range()
+    else:
+        input_date_range()
+    save_last_daily_range(RECORDING_START_DATE, RECORDING_END_DATE)
 
     print(f"{Color.BOLD}Getting user accounts...{Color.END}")
     users = get_users()
