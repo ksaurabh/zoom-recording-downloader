@@ -98,6 +98,10 @@ DRIVE_LOOKUP_CACHE = {}
 USE_ZOOM_CACHE = False
 USE_DRIVE_CACHE = False
 
+# When True, the per-lookup "[zoom cache]/[drive cache]" log lines are suppressed.
+# Reports set this so they don't flood; archiving leaves it False (verbose).
+SUPPRESS_CACHE_LOG = False
+
 # Wall-clock start of the current archive/dry-run, for elapsed-time progress.
 ARCHIVE_START_TS = None
 
@@ -389,10 +393,11 @@ def list_recordings(email, rec_start_date=None, rec_end_date=None):
     for start, end in per_delta(rec_start_date, rec_end_date, timedelta(days=30)):
         cache_key = f"{email}|{start.isoformat()}|{end.isoformat()}"
         if USE_ZOOM_CACHE and cache_key in ZOOM_RECORDINGS_CACHE:
-            print(
-                f"{Color.DARK_CYAN}[zoom cache] hit — {email} "
-                f"{start.date()}..{end.date()} (no Zoom API call){Color.END}"
-            )
+            if not SUPPRESS_CACHE_LOG:
+                print(
+                    f"{Color.DARK_CYAN}[zoom cache] hit — {email} "
+                    f"{start.date()}..{end.date()} (no Zoom API call){Color.END}"
+                )
             recordings.extend(ZOOM_RECORDINGS_CACHE[cache_key])
             continue
 
@@ -408,11 +413,12 @@ def list_recordings(email, rec_start_date=None, rec_end_date=None):
             recordings.extend(meetings)
             ZOOM_RECORDINGS_CACHE[cache_key] = meetings
             fetched_new = True
-            reason = "miss" if USE_ZOOM_CACHE else "disabled"
-            print(
-                f"{Color.DARK_CYAN}[zoom cache] {reason} — {email} "
-                f"{start.date()}..{end.date()}: called Zoom API, cache updated{Color.END}"
-            )
+            if not SUPPRESS_CACHE_LOG:
+                reason = "miss" if USE_ZOOM_CACHE else "disabled"
+                print(
+                    f"{Color.DARK_CYAN}[zoom cache] {reason} — {email} "
+                    f"{start.date()}..{end.date()}: called Zoom API, cache updated{Color.END}"
+                )
         else:
             print(f"No 'meetings' key found in response for {email} from {start} to {end}")
 
@@ -430,7 +436,8 @@ def list_recordings_for_day(email, day):
     iso = day.isoformat()
     cache_key = f"{email}|{iso}|{iso}"
     if USE_ZOOM_CACHE and cache_key in ZOOM_RECORDINGS_CACHE:
-        print(f"{Color.DARK_CYAN}[zoom cache] hit — {email} {iso} (no Zoom API call){Color.END}")
+        if not SUPPRESS_CACHE_LOG:
+            print(f"{Color.DARK_CYAN}[zoom cache] hit — {email} {iso} (no Zoom API call){Color.END}")
         return list(ZOOM_RECORDINGS_CACHE[cache_key])
 
     post_data = {"userId": email, "page_size": 300, "from": iso, "to": iso}
@@ -444,9 +451,10 @@ def list_recordings_for_day(email, day):
         meetings = recordings_data["meetings"]
         ZOOM_RECORDINGS_CACHE[cache_key] = meetings
         save_zoom_cache()
-        reason = "miss" if USE_ZOOM_CACHE else "disabled"
-        print(f"{Color.DARK_CYAN}[zoom cache] {reason} — {email} {iso}: "
-              f"called Zoom API, cache updated{Color.END}")
+        if not SUPPRESS_CACHE_LOG:
+            reason = "miss" if USE_ZOOM_CACHE else "disabled"
+            print(f"{Color.DARK_CYAN}[zoom cache] {reason} — {email} {iso}: "
+                  f"called Zoom API, cache updated{Color.END}")
         return meetings
 
     print(f"No 'meetings' key found in response for {email} on {iso}")
@@ -540,32 +548,40 @@ def prompt_date_range():
 def compute_usage(users, start_date, end_date, quiet=False):
     """ Sum cloud recording storage per user within the given date range.
         Returns a dict with sorted per-user rows and the overall totals.
-        When quiet is set, the per-user progress lines are suppressed (useful
-        when computing many ranges, e.g. the archive history build).
+        When quiet is set, the per-user progress lines and the per-lookup cache
+        log lines are suppressed (useful for reports and the archive history build).
     """
-    report = []
-    total_size = 0
-    total_count = 0
+    global SUPPRESS_CACHE_LOG
+    prev_suppress = SUPPRESS_CACHE_LOG
+    if quiet:
+        SUPPRESS_CACHE_LOG = True
 
-    for email, user_id, first_name, last_name in users:
-        user_info = (
-            f"{first_name} {last_name} - {email}" if first_name and last_name else f"{email}"
-        )
-        if not quiet:
-            print(f"==> Checking {user_info}")
+    try:
+        report = []
+        total_size = 0
+        total_count = 0
 
-        recordings = list_recordings(user_id, start_date, end_date)
-        user_size = sum(int(rec.get("total_size", 0) or 0) for rec in recordings)
-        user_count = sum(int(rec.get("recording_count", 0) or 0) for rec in recordings)
+        for email, user_id, first_name, last_name in users:
+            user_info = (
+                f"{first_name} {last_name} - {email}" if first_name and last_name else f"{email}"
+            )
+            if not quiet:
+                print(f"==> Checking {user_info}")
 
-        report.append([email, len(recordings), user_count, user_size])
-        total_size += user_size
-        total_count += len(recordings)
+            recordings = list_recordings(user_id, start_date, end_date)
+            user_size = sum(int(rec.get("total_size", 0) or 0) for rec in recordings)
+            user_count = sum(int(rec.get("recording_count", 0) or 0) for rec in recordings)
 
-    # sort by storage used, largest first
-    report.sort(key=lambda row: row[3], reverse=True)
+            report.append([email, len(recordings), user_count, user_size])
+            total_size += user_size
+            total_count += len(recordings)
 
-    return {"report": report, "total_size": total_size, "total_count": total_count}
+        # sort by storage used, largest first
+        report.sort(key=lambda row: row[3], reverse=True)
+
+        return {"report": report, "total_size": total_size, "total_count": total_count}
+    finally:
+        SUPPRESS_CACHE_LOG = prev_suppress
 
 
 def print_usage_table(result):
@@ -681,18 +697,20 @@ def drive_file_exists(drive_service, folder, filename):
         this run or a future one — can skip the Drive round-trip. """
     key = f"{folder}|{filename}"
     if USE_DRIVE_CACHE and key in DRIVE_LOOKUP_CACHE:
-        print(
-            f"{Color.DARK_CYAN}[drive cache] hit — {filename} "
-            f"(no Drive API call){Color.END}"
-        )
+        if not SUPPRESS_CACHE_LOG:
+            print(
+                f"{Color.DARK_CYAN}[drive cache] hit — {filename} "
+                f"(no Drive API call){Color.END}"
+            )
         return DRIVE_LOOKUP_CACHE[key]
     exists = drive_service.file_exists(folder, filename)
     DRIVE_LOOKUP_CACHE[key] = exists
-    reason = "miss" if USE_DRIVE_CACHE else "disabled"
-    print(
-        f"{Color.DARK_CYAN}[drive cache] {reason} — {filename}: "
-        f"called Drive API, cache updated{Color.END}"
-    )
+    if not SUPPRESS_CACHE_LOG:
+        reason = "miss" if USE_DRIVE_CACHE else "disabled"
+        print(
+            f"{Color.DARK_CYAN}[drive cache] {reason} — {filename}: "
+            f"called Drive API, cache updated{Color.END}"
+        )
     return exists
 
 
@@ -2378,6 +2396,12 @@ def main():
     print("13. Clear the Zoom recordings cache")
     print("14. Export daily cloud recording usage to CSV")
     operation = input("Enter choice (1-14): ")
+
+    # Read-only reports suppress the per-lookup cache log lines so they don't flood;
+    # archiving operations leave them on for visibility.
+    if operation in {"2", "3", "6", "7", "9", "11", "14"}:
+        global SUPPRESS_CACHE_LOG
+        SUPPRESS_CACHE_LOG = True
 
     if operation == "2":
         load_access_token()
