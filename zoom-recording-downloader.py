@@ -2000,6 +2000,58 @@ def report_recordings_vs_drive():
     print(f"Files missing from Drive: {t_files - t_dfiles}")
 
 
+def export_daily_usage():
+    """ Option 14: export per-day cloud recording usage (summed across all users)
+        for an entered date range to daily-usage-<timestamp>.csv. """
+    global USE_ZOOM_CACHE, ZOOM_RECORDINGS_CACHE
+
+    print("\nThis exports per-day cloud recording usage (all users) to a CSV.")
+    ZOOM_RECORDINGS_CACHE = load_zoom_cache()
+    USE_ZOOM_CACHE = input(
+        "Use cached Zoom recording data when available? (y/n): "
+    ).strip().lower() == "y"
+
+    input_date_range()
+
+    print(f"{Color.BOLD}Getting user accounts...{Color.END}")
+    users = get_users()
+
+    start_day = RECORDING_START_DATE.date()
+    end_day = RECORDING_END_DATE.date()
+
+    now = datetime.now(timezone.utc)
+    csv_path = f"daily-usage-{now.strftime('%Y%m%d-%H%M%S')}.csv"
+
+    print(f"\n{Color.BOLD}Daily usage {start_day} to {end_day}{Color.END}")
+    rows = []
+    g_meet = g_files = g_bytes = 0
+    day = start_day
+    while day <= end_day:
+        d_meet = d_files = d_bytes = 0
+        for email, user_id, first_name, last_name in users:
+            recordings = list_recordings_for_day(user_id, day)
+            d_meet += len(recordings)
+            d_files += sum(int(r.get("recording_count", 0) or 0) for r in recordings)
+            d_bytes += sum(int(r.get("total_size", 0) or 0) for r in recordings)
+        rows.append((day.isoformat(), d_meet, d_files, d_bytes))
+        g_meet += d_meet
+        g_files += d_files
+        g_bytes += d_bytes
+        print(f"  {day}: {d_meet} meeting(s), {d_files} file(s), {format_bytes(d_bytes)}")
+        day += timedelta(days=1)
+
+    with open(csv_path, "w", newline="", encoding="utf-8") as fd:
+        writer = csv.writer(fd)
+        writer.writerow(["date", "meetings", "files", "size_bytes", "size_human"])
+        for d, m, f, b in rows:
+            writer.writerow([d, m, f, b, format_bytes(b)])
+        writer.writerow([])
+        writer.writerow(["TOTAL", g_meet, g_files, g_bytes, format_bytes(g_bytes)])
+
+    print(f"\n{Color.GREEN}Wrote {len(rows)} day(s) to {csv_path}{Color.END}")
+    print(f"Total: {g_meet} meeting(s), {g_files} file(s), {format_bytes(g_bytes)}")
+
+
 def delete_recording_by_name():
     """ Ask for a Zoom recording name (topic), find matching recordings, and for
         each one that is already fully present in Google Drive, delete it from
@@ -2261,7 +2313,8 @@ def main():
     print("11. Report recordings in a date range vs Google Drive")
     print("12. Archive recordings in a date range (all users)")
     print("13. Clear the Zoom recordings cache")
-    operation = input("Enter choice (1-13): ")
+    print("14. Export daily cloud recording usage to CSV")
+    operation = input("Enter choice (1-14): ")
 
     if operation == "2":
         load_access_token()
@@ -2320,6 +2373,11 @@ def main():
 
     if operation == "13":
         clear_zoom_cache()
+        return
+
+    if operation == "14":
+        load_access_token()
+        export_daily_usage()
         return
 
     # Storage choice prompt
