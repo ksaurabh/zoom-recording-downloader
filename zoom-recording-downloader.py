@@ -2249,6 +2249,7 @@ def monitor_archiving_by_date_range():
             first_reading[d] = b
         latest_reading[d] = b
 
+    monitor_start = time.time()
     iteration = 0
     while True:
         iteration += 1
@@ -2306,8 +2307,13 @@ def monitor_archiving_by_date_range():
             print(f"  {Color.DARK_CYAN}{zero_day_seen}: {format_bytes(0)}{Color.END}")
 
         # Storage recouped = sum of drops from each day's first reading to its latest.
-        recouped = sum(first_reading[d] - latest_reading[d] for d in first_reading)
-        print(f"  {Color.BOLD}Storage recouped: {recouped / 1024 ** 3:.2f} GB{Color.END}")
+        recouped_gb = sum(first_reading[d] - latest_reading[d] for d in first_reading) / 1024 ** 3
+        elapsed = time.time() - monitor_start
+        rate = (recouped_gb / (elapsed / 60)) if elapsed > 0 else 0.0
+        print(
+            f"  {Color.BOLD}Storage recouped: {recouped_gb:.2f} GB "
+            f"({rate:.2f} GB/min over {format_elapsed(elapsed)}){Color.END}"
+        )
 
         if not nonzero:
             print(
