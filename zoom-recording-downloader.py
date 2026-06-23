@@ -2200,6 +2200,34 @@ def _day_total_storage(users, day):
     return total
 
 
+def _daily_storage_map(users, start_day, end_day, show_progress=False):
+    """ Build {date: total_size_bytes} across all users for the inclusive range
+        [start_day, end_day], using one range query per user (chunked into 30-day
+        Zoom calls) instead of a call per day — far fewer requests when the range
+        is large. Meetings are bucketed by the UTC date of their start time. """
+    totals = {}
+    start_dt = datetime(start_day.year, start_day.month, start_day.day, tzinfo=timezone.utc)
+    end_dt = (
+        datetime(end_day.year, end_day.month, end_day.day, tzinfo=timezone.utc)
+        + timedelta(days=1)
+    )
+    for i, (email, user_id, first_name, last_name) in enumerate(users, 1):
+        if show_progress and ORIGINAL_STDOUT is not None:
+            print(
+                f"\r  fetching {email} ({i}/{len(users)})... ",
+                end="", file=ORIGINAL_STDOUT, flush=True,
+            )
+        for rec in list_recordings(user_id, start_dt, end_dt):
+            try:
+                d = parser.parse(rec.get("start_time", "")).astimezone(timezone.utc).date()
+            except (ValueError, OverflowError, TypeError):
+                continue
+            totals[d] = totals.get(d, 0) + int(rec.get("total_size", 0) or 0)
+    if show_progress and ORIGINAL_STDOUT is not None:
+        print("\r" + " " * 70 + "\r", end="", file=ORIGINAL_STDOUT, flush=True)
+    return totals
+
+
 def monitor_archiving_by_date_range():
     """ Option 15: monitor archiving over a date range. Repeatedly scans daily
         cloud storage, collapsing the leading run of zero-storage (archived/empty)
@@ -2253,6 +2281,15 @@ def monitor_archiving_by_date_range():
     iteration = 0
     while True:
         iteration += 1
+        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        print(
+            f"\n{Color.BOLD}=== Monitor pass {iteration} ({stamp}) — "
+            f"{range_start} to {end_day} ==={Color.END}"
+        )
+
+        # Fetch the remaining range fresh in one (chunked) query per user, then
+        # scan the resulting per-day map — far fewer API calls than per-day lookups.
+        storage = _daily_storage_map(users, cur_start, end_day, show_progress=True)
 
         # Scan forward from cur_start collecting up to 5 non-zero-storage days,
         # noting the first zero-storage day seen along the way.
@@ -2261,7 +2298,7 @@ def monitor_archiving_by_date_range():
         zero_day_seen = None
         day = cur_start
         while day <= end_day and len(nonzero) < NONZERO_LIMIT:
-            b = _day_total_storage(users, day)
+            b = storage.get(day, 0)
             record_reading(day, b)
             if b > 0:
                 if first_nonzero is None:
@@ -2274,16 +2311,10 @@ def monitor_archiving_by_date_range():
         # If no zero day fell inside the window, peek one day past it so the pass
         # can still surface a zero-storage day when one exists right after.
         if zero_day_seen is None and day <= end_day:
-            pb = _day_total_storage(users, day)
+            pb = storage.get(day, 0)
             record_reading(day, pb)
             if pb == 0:
                 zero_day_seen = day
-
-        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-        print(
-            f"\n{Color.BOLD}=== Monitor pass {iteration} ({stamp}) — "
-            f"{range_start} to {end_day} ==={Color.END}"
-        )
 
         # Collapse the leading zero-storage prefix (from the original start).
         prefix_end = (first_nonzero - timedelta(days=1)) if first_nonzero else end_day
