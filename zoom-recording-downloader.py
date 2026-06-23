@@ -769,6 +769,10 @@ def monthly_usage_report():
     cache = load_usage_cache()
     users_getter = _lazy_users()
 
+    month_keys = []           # processed order (newest first)
+    per_email = {}            # email -> {month_key: size}
+    month_totals = {}         # month_key -> total size
+
     year, month = today.year, today.month
     for _ in range(months):
         key = f"{year:04d}-{month:02d}"
@@ -779,11 +783,50 @@ def monthly_usage_report():
         print(f"\n{Color.BOLD}{key} usage ({source}){Color.END}")
         print_usage_table(result)
 
+        month_keys.append(key)
+        month_totals[key] = result["total_size"]
+        for email, meetings, files, size in result["report"]:
+            per_email.setdefault(email, {})[key] = size
+
         # step back one month
         month -= 1
         if month == 0:
             month = 12
             year -= 1
+
+    _print_monthly_storage_matrix(month_keys, per_email, month_totals)
+
+
+def _print_monthly_storage_matrix(month_keys, per_email, month_totals):
+    """ Print a pivot table: one row per email, one column per month (oldest
+        first), each cell the storage that user used that month, plus a per-user
+        Total column and a TOTAL row. """
+    if not month_keys or not per_email:
+        return
+
+    # Columns oldest-first; rows sorted by total storage, largest first.
+    cols = list(reversed(month_keys))
+    emails = sorted(per_email, key=lambda e: sum(per_email[e].values()), reverse=True)
+
+    EMAIL_W, COL_W = 36, 13
+    header = (
+        f"{'Email':<{EMAIL_W}}"
+        + "".join(f"{k:>{COL_W}}" for k in cols)
+        + f"{'Total':>{COL_W}}"
+    )
+    print(f"\n{Color.BOLD}=== Monthly storage by user ==={Color.END}")
+    print(f"{Color.BOLD}{header}{Color.END}")
+    print("-" * len(header))
+    for email in emails:
+        row_total = sum(per_email[email].values())
+        cells = "".join(
+            f"{format_bytes(per_email[email].get(k, 0)):>{COL_W}}" for k in cols
+        )
+        print(f"{email:<{EMAIL_W}}{cells}{format_bytes(row_total):>{COL_W}}")
+    print("-" * len(header))
+    grand = sum(month_totals.values())
+    total_cells = "".join(f"{format_bytes(month_totals.get(k, 0)):>{COL_W}}" for k in cols)
+    print(f"{Color.BOLD}{'TOTAL':<{EMAIL_W}}{total_cells}{format_bytes(grand):>{COL_W}}{Color.END}")
 
 
 def monthly_usage_cached_vs_now():
