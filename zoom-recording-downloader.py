@@ -1209,6 +1209,52 @@ def _archive_specific_user(drive_service, confirm_each=False):
     print(f"\n{Color.GREEN}Archive complete.{Color.END}")
 
 
+def archive_date_range():
+    """ Option 12: archive every user's recordings within an entered date range to
+        Google Drive, optionally deleting them from Zoom after a successful upload.
+        Like option 4 but across all users for an explicit range, with no
+        plan-based cutoff. """
+    global GDRIVE_ENABLED, RECORDING_START_DATE, RECORDING_END_DATE
+
+    print("\nArchiving copies recordings to Google Drive, so it is required as the destination.")
+    drive_service = setup_google_drive()
+    if not drive_service:
+        print(f"{Color.RED}### Google Drive is not available; cannot archive.{Color.END}")
+        return
+    GDRIVE_ENABLED = True
+
+    configure_caches(interactive=True)
+    load_completed_meeting_ids()
+
+    input_date_range()
+
+    confirm_each = input(
+        "\nAsk for permission before downloading each file from Zoom? (y/n): "
+    ).strip().lower() == "y"
+
+    print(
+        f"\n{Color.RED}After a successful upload, recordings can be removed from Zoom to free "
+        f"space.{Color.END}\nThey are moved to the Zoom trash (recoverable for ~30 days), "
+        f"not permanently deleted."
+    )
+    delete_after = input(
+        "Delete from Zoom after successful upload? Type 'DELETE' to confirm: "
+    ).strip() == "DELETE"
+
+    print(f"{Color.BOLD}Getting user accounts...{Color.END}")
+    users = get_users()
+
+    print(
+        f"\n{Color.BOLD}Archiving all users from {RECORDING_START_DATE.date()} "
+        f"to {RECORDING_END_DATE.date()}{Color.END}"
+    )
+    download_recordings_for_users(
+        users, drive_service, delete_after=delete_after, recheck_drive=True,
+        confirm_each=confirm_each
+    )
+    print(f"\n{Color.GREEN}Archive complete.{Color.END}")
+
+
 def run_archive(auto=False):
     """ Plan and execute archiving of old cloud recordings to Google Drive so
         that Zoom usage stays under 70% of the storage plan.
@@ -2146,7 +2192,8 @@ def main():
     print("9. Report first N meetings missing from Google Drive")
     print("10. Import missing meetings (from option 9) and archive/delete from Zoom")
     print("11. Report recordings in a date range vs Google Drive")
-    operation = input("Enter choice (1-11): ")
+    print("12. Archive recordings in a date range (all users)")
+    operation = input("Enter choice (1-12): ")
 
     if operation == "2":
         load_access_token()
@@ -2196,6 +2243,11 @@ def main():
     if operation == "11":
         load_access_token()
         report_recordings_vs_drive()
+        return
+
+    if operation == "12":
+        load_access_token()
+        archive_date_range()
         return
 
     # Storage choice prompt
