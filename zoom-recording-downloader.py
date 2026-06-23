@@ -2239,6 +2239,16 @@ def monitor_archiving_by_date_range():
     cur_start = range_start
     NONZERO_LIMIT = 5
 
+    # Track each day's first observed storage vs. its latest reading; the sum of
+    # the drops across all observed days is the storage recouped by archiving.
+    first_reading = {}
+    latest_reading = {}
+
+    def record_reading(d, b):
+        if d not in first_reading:
+            first_reading[d] = b
+        latest_reading[d] = b
+
     iteration = 0
     while True:
         iteration += 1
@@ -2251,6 +2261,7 @@ def monitor_archiving_by_date_range():
         day = cur_start
         while day <= end_day and len(nonzero) < NONZERO_LIMIT:
             b = _day_total_storage(users, day)
+            record_reading(day, b)
             if b > 0:
                 if first_nonzero is None:
                     first_nonzero = day
@@ -2261,8 +2272,11 @@ def monitor_archiving_by_date_range():
 
         # If no zero day fell inside the window, peek one day past it so the pass
         # can still surface a zero-storage day when one exists right after.
-        if zero_day_seen is None and day <= end_day and _day_total_storage(users, day) == 0:
-            zero_day_seen = day
+        if zero_day_seen is None and day <= end_day:
+            pb = _day_total_storage(users, day)
+            record_reading(day, pb)
+            if pb == 0:
+                zero_day_seen = day
 
         stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
         print(
@@ -2290,6 +2304,10 @@ def monitor_archiving_by_date_range():
         # already shown via the collapsed leading prefix.
         if not leading_printed and zero_day_seen is not None:
             print(f"  {Color.DARK_CYAN}{zero_day_seen}: {format_bytes(0)}{Color.END}")
+
+        # Storage recouped = sum of drops from each day's first reading to its latest.
+        recouped = sum(first_reading[d] - latest_reading[d] for d in first_reading)
+        print(f"  {Color.BOLD}Storage recouped: {recouped / 1024 ** 3:.2f} GB{Color.END}")
 
         if not nonzero:
             print(
