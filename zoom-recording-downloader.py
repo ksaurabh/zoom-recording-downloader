@@ -625,6 +625,23 @@ def save_drive_cache():
         json.dump(DRIVE_LOOKUP_CACHE, fd)
 
 
+def clear_zoom_cache():
+    """ Option 13: empty the Zoom recordings cache (in memory and on disk) so the
+        next run re-queries Zoom for fresh recording listings. """
+    global ZOOM_RECORDINGS_CACHE
+    n = len(load_zoom_cache())
+    ZOOM_RECORDINGS_CACHE = {}
+    try:
+        if os.path.exists(ZOOM_CACHE_FILE):
+            os.remove(ZOOM_CACHE_FILE)
+        print(
+            f"{Color.GREEN}Cleared Zoom cache ({n} "
+            f"{'entry' if n == 1 else 'entries'}) — {ZOOM_CACHE_FILE} removed.{Color.END}"
+        )
+    except OSError as e:
+        print(f"{Color.RED}### Could not remove {ZOOM_CACHE_FILE}: {e}{Color.END}")
+
+
 def configure_caches(interactive=True, use_zoom=True, use_drive=False):
     """ Load the Zoom-recordings and Google-Drive lookup caches and decide whether
         to read from them. When interactive, the operator is asked about each cache
@@ -2243,7 +2260,8 @@ def main():
     print("10. Import missing meetings (from option 9) and archive/delete from Zoom")
     print("11. Report recordings in a date range vs Google Drive")
     print("12. Archive recordings in a date range (all users)")
-    operation = input("Enter choice (1-12): ")
+    print("13. Clear the Zoom recordings cache")
+    operation = input("Enter choice (1-13): ")
 
     if operation == "2":
         load_access_token()
@@ -2298,6 +2316,10 @@ def main():
     if operation == "12":
         load_access_token()
         archive_date_range()
+        return
+
+    if operation == "13":
+        clear_zoom_cache()
         return
 
     # Storage choice prompt
