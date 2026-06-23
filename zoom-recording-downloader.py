@@ -1786,6 +1786,107 @@ def import_and_archive_missing_meetings():
     print(f"Incomplete / failed    : {failed}")
 
 
+def report_recordings_vs_drive():
+    """ Option 11: for a date range, report per user and in total how many meetings
+        and files exist in Zoom (with their size), and how many of those files are
+        already present in Google Drive. """
+    global GDRIVE_ENABLED
+
+    print("\nThis compares Zoom recordings in a date range against Google Drive.")
+    drive_service = setup_google_drive()
+    if not drive_service:
+        print(f"{Color.RED}### Google Drive is not available.{Color.END}")
+        return
+    GDRIVE_ENABLED = True
+
+    configure_caches(interactive=True)
+
+    prompt_date_range()
+
+    print(f"{Color.BOLD}Getting user accounts...{Color.END}")
+    users = get_users()
+
+    rows = []  # (email, meetings, files, bytes, unknown, drive_files, drive_bytes)
+    t_meet = t_files = t_bytes = t_unknown = t_dfiles = t_dbytes = 0
+
+    for email, user_id, first_name, last_name in users:
+        user_info = (
+            f"{first_name} {last_name} - {email}" if first_name and last_name else f"{email}"
+        )
+        print(f"\n{Color.BOLD}Checking {user_info}{Color.END}")
+        recordings = list_recordings(user_id)
+        print(f"==> {len(recordings)} recording(s) in range "
+              f"{RECORDING_START_DATE.date()} to {RECORDING_END_DATE.date()}")
+
+        u_files = u_bytes = u_unknown = u_dfiles = u_dbytes = 0
+        for recording in recordings:
+            for file_extension, recording_id, recording_type, size in _iter_recording_files(recording):
+                params = {
+                    "file_extension": file_extension,
+                    "recording": recording,
+                    "recording_id": recording_id,
+                    "recording_type": recording_type,
+                    "email": email,
+                }
+                filename, folder_name = format_filename(params)
+                sanitized_filename = path_validate.sanitize_filename(filename)
+
+                u_files += 1
+                if size is None:
+                    u_unknown += 1
+                else:
+                    u_bytes += size
+
+                try:
+                    on_drive = drive_file_exists(drive_service, folder_name, sanitized_filename)
+                except Exception:
+                    on_drive = False
+                if on_drive:
+                    u_dfiles += 1
+                    if size is not None:
+                        u_dbytes += size
+
+        rows.append((email, len(recordings), u_files, u_bytes, u_unknown, u_dfiles, u_dbytes))
+        t_meet += len(recordings)
+        t_files += u_files
+        t_bytes += u_bytes
+        t_unknown += u_unknown
+        t_dfiles += u_dfiles
+        t_dbytes += u_dbytes
+
+    save_drive_cache()
+
+    rows.sort(key=lambda r: r[3], reverse=True)  # largest Zoom size first
+
+    header = (
+        f"{'Email':<32}{'Meetings':>9}{'Files':>7}{'Zoom size':>13}"
+        f"{'On Drive':>9}{'Drive size':>13}{'Missing':>8}"
+    )
+    print(f"\n{Color.BOLD}Recordings vs Google Drive "
+          f"({RECORDING_START_DATE.date()} to {RECORDING_END_DATE.date()}){Color.END}")
+    print(f"{Color.BOLD}{header}{Color.END}")
+    print("-" * len(header))
+    for email, meetings, files, fbytes, unknown, dfiles, dbytes in rows:
+        print(
+            f"{email:<32}{meetings:>9}{files:>7}{format_bytes(fbytes):>13}"
+            f"{dfiles:>9}{format_bytes(dbytes):>13}{files - dfiles:>8}"
+        )
+    print("-" * len(header))
+    print(
+        f"{Color.BOLD}{'TOTAL':<32}{t_meet:>9}{t_files:>7}{format_bytes(t_bytes):>13}"
+        f"{t_dfiles:>9}{format_bytes(t_dbytes):>13}{t_files - t_dfiles:>8}{Color.END}"
+    )
+
+    print(f"\n{Color.BOLD}=== Summary "
+          f"({RECORDING_START_DATE.date()} to {RECORDING_END_DATE.date()}) ==={Color.END}")
+    print(f"Meetings in Zoom        : {t_meet}")
+    print(f"Files in Zoom           : {t_files} "
+          f"({t_unknown} with size unknown to Zoom)")
+    print(f"Zoom storage            : {format_bytes(t_bytes)} (sum of known file sizes)")
+    print(f"Files in Google Drive   : {t_dfiles} ({format_bytes(t_dbytes)})")
+    print(f"Files missing from Drive: {t_files - t_dfiles}")
+
+
 def delete_recording_by_name():
     """ Ask for a Zoom recording name (topic), find matching recordings, and for
         each one that is already fully present in Google Drive, delete it from
@@ -2044,7 +2145,8 @@ def main():
     print("8. Dry run archive (no download/upload; report volume + CSV)")
     print("9. Report first N meetings missing from Google Drive")
     print("10. Import missing meetings (from option 9) and archive/delete from Zoom")
-    operation = input("Enter choice (1-10): ")
+    print("11. Report recordings in a date range vs Google Drive")
+    operation = input("Enter choice (1-11): ")
 
     if operation == "2":
         load_access_token()
@@ -2089,6 +2191,11 @@ def main():
     if operation == "10":
         load_access_token()
         import_and_archive_missing_meetings()
+        return
+
+    if operation == "11":
+        load_access_token()
+        report_recordings_vs_drive()
         return
 
     # Storage choice prompt
