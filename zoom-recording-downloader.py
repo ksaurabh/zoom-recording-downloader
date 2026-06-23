@@ -1534,22 +1534,17 @@ def _recording_missing_files(drive_service, email, recording):
     return missing, len(downloads)
 
 
-def get_meeting_recordings(meeting_uuid):
-    """ Fetch one meeting's cloud recordings by UUID. Returns (data, error) where
-        data is the meeting object (with recording_files) or None on failure. """
-    if meeting_uuid.startswith("/") or "//" in meeting_uuid:
-        encoded = quote(quote(meeting_uuid, safe=""), safe="")
-    else:
-        encoded = quote(meeting_uuid, safe="")
-    url = f"https://api.zoom.us/v2/meetings/{encoded}/recordings"
-    response = requests.get(url, headers=AUTHORIZATION_HEADER)
-    if not response.ok:
-        try:
-            message = response.json().get("message", response.text)
-        except ValueError:
-            message = response.text
-        return None, f"HTTP {response.status_code}: {message}"
-    return response.json(), None
+def fetch_recording_by_uuid(email, meeting_uuid, start_dt):
+    """ Find one meeting's recording object via the user-recordings endpoint that
+        the app is scoped for (the per-meeting endpoint needs a scope we don't
+        have). Searches a small window around start_dt for the matching UUID.
+        Returns (recording, error). """
+    start = start_dt - timedelta(days=1)
+    end = start_dt + timedelta(days=2)
+    for recording in list_recordings(email, start, end):
+        if recording.get("uuid") == meeting_uuid:
+            return recording, None
+    return None, "meeting not found in the user's recordings near that date"
 
 
 def report_missing_meetings():
@@ -1616,7 +1611,7 @@ def report_missing_meetings():
         start = recording.get("start_time", "")
         uuid = recording.get("uuid", "")
         print(f"{Color.BOLD}#{i} {topic} ({start}){Color.END} — {miss}/{total} file(s) missing")
-        print(f"email={email} uuid={uuid}")
+        print(f"email={email} uuid={uuid} start={start}")
     print()
 
 
@@ -1719,12 +1714,13 @@ def import_and_archive_missing_meetings():
             break
         lines.append(line)
 
-    # Parse unique (email, uuid) pairs.
+    # Parse unique (email, uuid, start) entries.
     parsed = []
     seen = set()
     for line in lines:
         m_uuid = regex.search(r"uuid=(\S+)", line)
         m_email = regex.search(r"email=(\S+)", line)
+        m_start = regex.search(r"start=(\S+)", line)
         if not (m_uuid and m_email):
             continue
         email = m_email.group(1)
@@ -1732,7 +1728,7 @@ def import_and_archive_missing_meetings():
         if uuid in seen:
             continue
         seen.add(uuid)
-        parsed.append((email, uuid))
+        parsed.append((email, uuid, m_start.group(1) if m_start else None))
 
     if not parsed:
         print(f"{Color.YELLOW}No 'email=... uuid=...' lines found in the input.{Color.END}")
@@ -1747,14 +1743,28 @@ def import_and_archive_missing_meetings():
         print(f"{Color.YELLOW}Not deleting from Zoom; will only ensure files are on Drive.{Color.END}")
 
     fully_present = deleted = failed = 0
-    for email, uuid in parsed:
+    for email, uuid, start_str in parsed:
         print(f"\n{Color.BOLD}=== {email} — {uuid} ==={Color.END}")
-        data, err = get_meeting_recordings(uuid)
+
+        start_dt = None
+        if start_str:
+            try:
+                start_dt = parser.parse(start_str)
+                if start_dt.tzinfo is None:
+                    start_dt = start_dt.replace(tzinfo=timezone.utc)
+            except (ValueError, OverflowError):
+                start_dt = None
+        if start_dt is None:
+            print(f"{Color.RED}  Missing/invalid start= for this meeting; re-run option 9.{Color.END}")
+            failed += 1
+            continue
+
+        data, err = fetch_recording_by_uuid(email, uuid, start_dt)
         if err:
             print(f"{Color.RED}  Could not fetch meeting from Zoom: {err}{Color.END}")
             failed += 1
             continue
-        # Preserve the original UUID for deletion (response may re-encode it).
+        # Preserve the original UUID for deletion.
         data["uuid"] = uuid
         all_present, was_deleted = archive_and_maybe_delete_recording(
             drive_service, email, data, delete_after
