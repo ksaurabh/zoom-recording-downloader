@@ -422,6 +422,37 @@ def list_recordings(email, rec_start_date=None, rec_end_date=None):
     return recordings
 
 
+def list_recordings_for_day(email, day):
+    """ Fetch a user's recordings for a single calendar day in one Zoom call.
+        `day` is a date. Zoom's from/to are inclusive date strings, so from==to==day
+        returns exactly that day (no overlap with adjacent days). Uses the per-day
+        Zoom cache. """
+    iso = day.isoformat()
+    cache_key = f"{email}|{iso}|{iso}"
+    if USE_ZOOM_CACHE and cache_key in ZOOM_RECORDINGS_CACHE:
+        print(f"{Color.DARK_CYAN}[zoom cache] hit — {email} {iso} (no Zoom API call){Color.END}")
+        return list(ZOOM_RECORDINGS_CACHE[cache_key])
+
+    post_data = {"userId": email, "page_size": 300, "from": iso, "to": iso}
+    response = requests.get(
+        url=f"https://api.zoom.us/v2/users/{email}/recordings",
+        headers=AUTHORIZATION_HEADER,
+        params=post_data,
+    )
+    recordings_data = response.json()
+    if isinstance(recordings_data, dict) and "meetings" in recordings_data:
+        meetings = recordings_data["meetings"]
+        ZOOM_RECORDINGS_CACHE[cache_key] = meetings
+        save_zoom_cache()
+        reason = "miss" if USE_ZOOM_CACHE else "disabled"
+        print(f"{Color.DARK_CYAN}[zoom cache] {reason} — {email} {iso}: "
+              f"called Zoom API, cache updated{Color.END}")
+        return meetings
+
+    print(f"No 'meetings' key found in response for {email} on {iso}")
+    return []
+
+
 def download_recording(download_url, email, filename, folder_name):
     dl_dir = os.sep.join([DOWNLOAD_DIRECTORY, folder_name])
     sanitized_download_dir = path_validate.sanitize_filepath(dl_dir)
@@ -1027,9 +1058,11 @@ def _print_archive_progress(email, day, checked, found, missing):
 
 def download_recordings_for_users(users, drive_service, delete_after=False, recheck_drive=False, confirm_each=False):
     """ Download (and optionally upload to Google Drive) every recording for the
-        given users within the globally configured date range. When delete_after
-        is set, a meeting's cloud recordings are moved to the Zoom trash once all
-        of its files have been uploaded successfully.
+        given users within the globally configured date range, processing one
+        calendar day at a time per user: each day is fetched from Zoom, fully
+        archived, and checkpointed (progress line + cache save) before the next
+        day. When delete_after is set, a meeting's cloud recordings are moved to
+        the Zoom trash once all of its files have been uploaded successfully.
 
         By default a meeting listed in completed-downloads.log is skipped without
         contacting Drive. When recheck_drive is set (used by archiving), that log
@@ -1045,135 +1078,152 @@ def download_recordings_for_users(users, drive_service, delete_after=False, rech
     # Running totals across the whole run, shown on each progress line.
     checked = found = missing = 0
 
+    def process_recording(email, recording, index, total_count):
+        """ Download/upload every file of one meeting and optionally trash it from
+            Zoom once all files are safely in Drive. Updates the shared counters. """
+        nonlocal checked, found, missing
+        try:
+            meeting_uuid = recording["uuid"]
+
+            if not recheck_drive and meeting_uuid in COMPLETED_MEETING_IDS:
+                print(
+                    f"\n==> Skipping already downloaded recording {index + 1} of {total_count}"
+                )
+                return
+
+            downloads = get_downloads(recording)
+
+        except Exception as e:
+            print(
+                f"{Color.RED}### Failed to get download URLs for recording {index + 1} "
+                f"of {total_count} due to error: {str(e)}{Color.END}"
+            )
+            return
+
+        print(f"\n==> Processing recording {index + 1} of {total_count}")
+
+        all_uploaded = True
+        for file_type, file_extension, download_url, recording_type, recording_id in downloads:
+            try:
+                params = {
+                    "file_extension": file_extension,
+                    "recording": recording,
+                    "recording_id": recording_id,
+                    "recording_type": recording_type,
+                    "email": email
+                }
+                filename, folder_name = format_filename(params)
+
+                sanitized_download_dir = path_validate.sanitize_filepath(
+                    os.sep.join([DOWNLOAD_DIRECTORY, folder_name])
+                )
+                sanitized_filename = path_validate.sanitize_filename(filename)
+                full_filename = os.sep.join([sanitized_download_dir, sanitized_filename])
+
+                # Check if file exists
+                print(f"    > Checking if file exists...{sanitized_filename} in folder {folder_name}")
+                checked += 1
+                found_file = False
+                try:
+                    found_file = drive_file_exists(drive_service, folder_name, sanitized_filename)  # Check if file exists
+                except Exception as e:
+                    print(f"{Color.RED}{str(e)}{Color.END}"  )
+                    print(f"FAILED: Checking if file exists...{sanitized_filename} in folder {folder_name}")
+                    missing += 1  # couldn't confirm in Drive; treat as not present
+                    all_uploaded = False
+                    continue
+
+                if found_file:
+                    found += 1
+                    print(f"    > Skipping existing file: {sanitized_filename}")
+                    continue
+
+                missing += 1
+                # Permission gate: only after confirming the file is missing
+                # from Drive do we ask the operator whether to download it.
+                if confirm_each:
+                    if input(
+                        f"    > Not on Drive. Download {sanitized_filename} from Zoom? (y/n): "
+                    ).strip().lower() != "y":
+                        print(f"    > {Color.YELLOW}Skipped by user:{Color.END} {sanitized_filename}")
+                        all_uploaded = False
+                        continue
+
+                print(f"    > Downloading {filename}")
+                if download_recording(download_url, email, filename, folder_name):
+                    if GDRIVE_ENABLED and drive_service:
+                        print(f"    > Uploading to Google Drive...")
+                        print("Google Drive Folder name: %s. full file name: %s, sanitized_file_name: %s" % (folder_name, full_filename, sanitized_filename))
+                        success = drive_service.upload_file(full_filename, folder_name, sanitized_filename)
+                        if success:
+                            note_drive_upload(folder_name, sanitized_filename)
+                        if success and os.path.exists(full_filename):
+                            os.remove(full_filename)
+                            if not os.listdir(sanitized_download_dir):
+                                os.rmdir(sanitized_download_dir)
+                        if not success:
+                            all_uploaded = False
+                else:
+                    all_uploaded = False
+
+            except Exception as e:
+                all_uploaded = False
+                print(
+                    f"{Color.RED}### Failed to process file {file_type} "
+                    f"for recording {index + 1} of {total_count} due to error: "
+                    f"{str(e)}{Color.END}"
+                )
+                continue
+
+        with open(COMPLETED_MEETING_IDS_LOG, "a") as fd:
+            fd.write(f"{meeting_uuid}\n")
+            COMPLETED_MEETING_IDS.add(meeting_uuid)
+
+        # Free Zoom storage only once every file is safely in Google Drive
+        if delete_after and all_uploaded and GDRIVE_ENABLED and drive_service:
+            ok, message = delete_cloud_recording(meeting_uuid)
+            if ok:
+                print(f"    > {Color.YELLOW}Removed from Zoom (moved to trash){Color.END}")
+            else:
+                print(f"{Color.RED}### Failed to delete recording from Zoom - {message}{Color.END}")
+
+    range_start = RECORDING_START_DATE
+    range_end = RECORDING_END_DATE
+
     for email, user_id, first_name, last_name in users:
         userInfo = (
             f"{first_name} {last_name} - {email}" if first_name and last_name else f"{email}"
         )
-        print(f"\n{Color.BOLD}Getting recording list for {userInfo}{Color.END}")
+        print(
+            f"\n{Color.BOLD}Archiving {userInfo} one day at a time "
+            f"({range_start.date()} to {range_end.date()}){Color.END}"
+        )
 
-        recordings = list_recordings(user_id)
-        recordings.sort(key=lambda r: r.get("start_time", ""))
-        total_count = len(recordings)
-        print(f"==> Found {total_count} recordings")
+        any_recordings = False
+        # Walk one calendar day at a time, inclusive of the end date (matching the
+        # previous range semantics). Each day is fetched, fully processed, and
+        # checkpointed before moving on.
+        day = range_start.date()
+        last_day = range_end.date()
+        while day <= last_day:
+            recordings = list_recordings_for_day(user_id, day)
+            recordings.sort(key=lambda r: r.get("start_time", ""))
+            total_count = len(recordings)
 
-        current_day = None
+            if total_count:
+                any_recordings = True
+                print(f"\n{Color.BOLD}{email} — {day}: {total_count} recording(s){Color.END}")
+                for index, recording in enumerate(recordings):
+                    process_recording(email, recording, index, total_count)
 
-        for index, recording in enumerate(recordings):
-            rec_day = _recording_day(recording)
-            if rec_day is not None:
-                # A change of day means the previous day is fully processed.
-                if current_day is not None and rec_day != current_day:
-                    _print_archive_progress(email, current_day, checked, found, missing)
-                current_day = rec_day
+                # Per-day checkpoint: progress line + persist the Drive cache.
+                _print_archive_progress(email, day, checked, found, missing)
+                save_drive_cache()
 
-            try:
-                meeting_uuid = recording["uuid"]
+            day += timedelta(days=1)
 
-                if not recheck_drive and meeting_uuid in COMPLETED_MEETING_IDS:
-                    print(
-                        f"\n==> Skipping already downloaded recording {index + 1} of {total_count}"
-                    )
-                    continue
-
-                downloads = get_downloads(recording)
-
-            except Exception as e:
-                print(
-                    f"{Color.RED}### Failed to get download URLs for recording {index + 1} "
-                    f"of {total_count} due to error: {str(e)}{Color.END}"
-                )
-                continue
-
-            print(f"\n==> Processing recording {index + 1} of {total_count}")
-
-            all_uploaded = True
-            for file_type, file_extension, download_url, recording_type, recording_id in downloads:
-                try:
-                    params = {
-                        "file_extension": file_extension,
-                        "recording": recording,
-                        "recording_id": recording_id,
-                        "recording_type": recording_type,
-                        "email": email
-                    }
-                    filename, folder_name = format_filename(params)
-
-                    sanitized_download_dir = path_validate.sanitize_filepath(
-                        os.sep.join([DOWNLOAD_DIRECTORY, folder_name])
-                    )
-                    sanitized_filename = path_validate.sanitize_filename(filename)
-                    full_filename = os.sep.join([sanitized_download_dir, sanitized_filename])
-
-                    # Check if file exists
-                    print(f"    > Checking if file exists...{sanitized_filename} in folder {folder_name}")
-                    checked += 1
-                    found_file = False
-                    try:
-                        found_file = drive_file_exists(drive_service, folder_name, sanitized_filename)  # Check if file exists
-                    except Exception as e:
-                        print(f"{Color.RED}{str(e)}{Color.END}"  )
-                        print(f"FAILED: Checking if file exists...{sanitized_filename} in folder {folder_name}")
-                        missing += 1  # couldn't confirm in Drive; treat as not present
-                        all_uploaded = False
-                        continue
-
-                    if found_file:
-                        found += 1
-                        print(f"    > Skipping existing file: {sanitized_filename}")
-                        continue
-
-                    missing += 1
-                    # Permission gate: only after confirming the file is missing
-                    # from Drive do we ask the operator whether to download it.
-                    if confirm_each:
-                        if input(
-                            f"    > Not on Drive. Download {sanitized_filename} from Zoom? (y/n): "
-                        ).strip().lower() != "y":
-                            print(f"    > {Color.YELLOW}Skipped by user:{Color.END} {sanitized_filename}")
-                            all_uploaded = False
-                            continue
-
-                    print(f"    > Downloading {filename}")
-                    if download_recording(download_url, email, filename, folder_name):
-                        if GDRIVE_ENABLED and drive_service:
-                            print(f"    > Uploading to Google Drive...")
-                            print("Google Drive Folder name: %s. full file name: %s, sanitized_file_name: %s" % (folder_name, full_filename, sanitized_filename))
-                            success = drive_service.upload_file(full_filename, folder_name, sanitized_filename)
-                            if success:
-                                note_drive_upload(folder_name, sanitized_filename)
-                            if success and os.path.exists(full_filename):
-                                os.remove(full_filename)
-                                if not os.listdir(sanitized_download_dir):
-                                    os.rmdir(sanitized_download_dir)
-                            if not success:
-                                all_uploaded = False
-                    else:
-                        all_uploaded = False
-
-                except Exception as e:
-                    all_uploaded = False
-                    print(
-                        f"{Color.RED}### Failed to process file {file_type} "
-                        f"for recording {index + 1} of {total_count} due to error: "
-                        f"{str(e)}{Color.END}"
-                    )
-                    continue
-
-            with open(COMPLETED_MEETING_IDS_LOG, "a") as fd:
-                fd.write(f"{meeting_uuid}\n")
-                COMPLETED_MEETING_IDS.add(meeting_uuid)
-
-            # Free Zoom storage only once every file is safely in Google Drive
-            if delete_after and all_uploaded and GDRIVE_ENABLED and drive_service:
-                ok, message = delete_cloud_recording(meeting_uuid)
-                if ok:
-                    print(f"    > {Color.YELLOW}Removed from Zoom (moved to trash){Color.END}")
-                else:
-                    print(f"{Color.RED}### Failed to delete recording from Zoom - {message}{Color.END}")
-
-        # All recordings for this user processed; flush the final day's progress.
-        if current_day is not None:
-            _print_archive_progress(email, current_day, checked, found, missing)
+        if not any_recordings:
+            print(f"==> No recordings for {email} in range")
         save_drive_cache()
 
 
