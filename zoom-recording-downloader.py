@@ -1514,6 +1514,268 @@ def recording_files_in_drive(drive_service, email, recording):
     return all_present, len(downloads)
 
 
+def _recording_missing_files(drive_service, email, recording):
+    """ Return (missing, total): the list of (folder, filename) for files NOT in
+        Google Drive, and the total number of files for the recording. """
+    downloads = get_downloads(recording)
+    missing = []
+    for file_type, file_extension, download_url, recording_type, recording_id in downloads:
+        params = {
+            "file_extension": file_extension,
+            "recording": recording,
+            "recording_id": recording_id,
+            "recording_type": recording_type,
+            "email": email,
+        }
+        filename, folder_name = format_filename(params)
+        sanitized_filename = path_validate.sanitize_filename(filename)
+        if not drive_file_exists(drive_service, folder_name, sanitized_filename):
+            missing.append((folder_name, sanitized_filename))
+    return missing, len(downloads)
+
+
+def get_meeting_recordings(meeting_uuid):
+    """ Fetch one meeting's cloud recordings by UUID. Returns (data, error) where
+        data is the meeting object (with recording_files) or None on failure. """
+    if meeting_uuid.startswith("/") or "//" in meeting_uuid:
+        encoded = quote(quote(meeting_uuid, safe=""), safe="")
+    else:
+        encoded = quote(meeting_uuid, safe="")
+    url = f"https://api.zoom.us/v2/meetings/{encoded}/recordings"
+    response = requests.get(url, headers=AUTHORIZATION_HEADER)
+    if not response.ok:
+        try:
+            message = response.json().get("message", response.text)
+        except ValueError:
+            message = response.text
+        return None, f"HTTP {response.status_code}: {message}"
+    return response.json(), None
+
+
+def report_missing_meetings():
+    """ Option 9: scan recordings in a date range and print info on the first N
+        meetings that have at least one file missing from Google Drive. The printed
+        'email=... uuid=...' lines can be pasted into option 10 to archive/delete. """
+    global GDRIVE_ENABLED
+
+    print("\nThis lists meetings whose files are not fully present in Google Drive.")
+    drive_service = setup_google_drive()
+    if not drive_service:
+        print(f"{Color.RED}### Google Drive is not available.{Color.END}")
+        return
+    GDRIVE_ENABLED = True
+
+    configure_caches(interactive=True)
+
+    try:
+        limit = int(input("How many missing meetings to list? [10]: ").strip() or "10")
+    except ValueError:
+        limit = 10
+    limit = max(1, limit)
+
+    prompt_date_range()
+
+    print(f"{Color.BOLD}Getting user accounts...{Color.END}")
+    users = get_users()
+
+    found_missing = []  # (email, recording, missing_count, total)
+    for email, user_id, first_name, last_name in users:
+        if len(found_missing) >= limit:
+            break
+        recordings = list_recordings(user_id)
+        recordings.sort(key=lambda r: r.get("start_time", ""))
+        for recording in recordings:
+            if len(found_missing) >= limit:
+                break
+            try:
+                missing, total = _recording_missing_files(drive_service, email, recording)
+            except Exception as e:
+                print(f"{Color.RED}  Could not check a recording for {email}: {e}{Color.END}")
+                continue
+            if total == 0:
+                continue
+            if missing:
+                found_missing.append((email, recording, len(missing), total))
+
+    save_drive_cache()
+
+    if not found_missing:
+        print(
+            f"\n{Color.GREEN}No missing meetings found in "
+            f"{RECORDING_START_DATE.date()}..{RECORDING_END_DATE.date()}.{Color.END}"
+        )
+        return
+
+    print(
+        f"\n{Color.BOLD}=== First {len(found_missing)} meeting(s) missing from "
+        f"Google Drive ==={Color.END}"
+    )
+    print("Copy the 'email=... uuid=...' lines below and paste them into option 10.\n")
+    for i, (email, recording, miss, total) in enumerate(found_missing, 1):
+        topic = recording.get("topic", "")
+        start = recording.get("start_time", "")
+        uuid = recording.get("uuid", "")
+        print(f"{Color.BOLD}#{i} {topic} ({start}){Color.END} — {miss}/{total} file(s) missing")
+        print(f"email={email} uuid={uuid}")
+    print()
+
+
+def archive_and_maybe_delete_recording(drive_service, email, recording, delete_after):
+    """ Ensure every file of a recording is in Google Drive — downloading and
+        uploading the missing ones — then, if all are present and delete_after is
+        set, move the meeting's recordings to the Zoom trash. Returns
+        (all_present, deleted). """
+    meeting_uuid = recording.get("uuid", "")
+    try:
+        downloads = get_downloads(recording)
+    except Exception as e:
+        print(f"{Color.RED}  No downloadable files: {e}{Color.END}")
+        return False, False
+
+    all_present = True
+    for file_type, file_extension, download_url, recording_type, recording_id in downloads:
+        params = {
+            "file_extension": file_extension,
+            "recording": recording,
+            "recording_id": recording_id,
+            "recording_type": recording_type,
+            "email": email,
+        }
+        filename, folder_name = format_filename(params)
+        sanitized_download_dir = path_validate.sanitize_filepath(
+            os.sep.join([DOWNLOAD_DIRECTORY, folder_name])
+        )
+        sanitized_filename = path_validate.sanitize_filename(filename)
+        full_filename = os.sep.join([sanitized_download_dir, sanitized_filename])
+
+        try:
+            on_drive = drive_file_exists(drive_service, folder_name, sanitized_filename)
+        except Exception as e:
+            print(f"{Color.RED}  Drive check failed for {sanitized_filename}: {e}{Color.END}")
+            all_present = False
+            continue
+
+        if on_drive:
+            print(f"  {Color.GREEN}Already on Drive:{Color.END} {sanitized_filename}")
+            continue
+
+        print(f"  {Color.YELLOW}Missing — downloading{Color.END} {sanitized_filename}")
+        if download_recording(download_url, email, filename, folder_name):
+            success = drive_service.upload_file(full_filename, folder_name, sanitized_filename)
+            if success:
+                note_drive_upload(folder_name, sanitized_filename)
+                print(f"  {Color.GREEN}Uploaded to Drive.{Color.END}")
+                if os.path.exists(full_filename):
+                    os.remove(full_filename)
+                    if os.path.isdir(sanitized_download_dir) and not os.listdir(sanitized_download_dir):
+                        os.rmdir(sanitized_download_dir)
+            else:
+                print(f"  {Color.RED}Upload failed.{Color.END}")
+                all_present = False
+        else:
+            print(f"  {Color.RED}Download failed.{Color.END}")
+            all_present = False
+
+    deleted = False
+    if all_present and delete_after and GDRIVE_ENABLED and drive_service:
+        ok, message = delete_cloud_recording(meeting_uuid)
+        if ok:
+            deleted = True
+            print(f"  {Color.YELLOW}Deleted from Zoom (moved to trash).{Color.END}")
+        else:
+            print(f"  {Color.RED}Failed to delete from Zoom - {message}{Color.END}")
+    elif not all_present:
+        print(f"  {Color.RED}Not all files in Drive; left in Zoom.{Color.END}")
+
+    return all_present, deleted
+
+
+def import_and_archive_missing_meetings():
+    """ Option 10: read 'email=... uuid=...' lines (pasted from option 9), and for
+        each meeting ensure its files are in Google Drive (downloading/uploading the
+        missing ones) and delete it from Zoom once everything is safely archived. """
+    global GDRIVE_ENABLED
+
+    print("\nThis archives the pasted meetings to Google Drive and deletes them from Zoom.")
+    drive_service = setup_google_drive()
+    if not drive_service:
+        print(f"{Color.RED}### Google Drive is not available.{Color.END}")
+        return
+    GDRIVE_ENABLED = True
+
+    configure_caches(interactive=True)
+
+    print(
+        "\nPaste the lines from option 9 (each containing 'email=... uuid=...').\n"
+        "Finish with a line containing only END (or press Ctrl-D):"
+    )
+    lines = []
+    while True:
+        try:
+            line = input()
+        except EOFError:
+            break
+        if line.strip() == "END":
+            break
+        lines.append(line)
+
+    # Parse unique (email, uuid) pairs.
+    parsed = []
+    seen = set()
+    for line in lines:
+        m_uuid = regex.search(r"uuid=(\S+)", line)
+        m_email = regex.search(r"email=(\S+)", line)
+        if not (m_uuid and m_email):
+            continue
+        email = m_email.group(1)
+        uuid = m_uuid.group(1)
+        if uuid in seen:
+            continue
+        seen.add(uuid)
+        parsed.append((email, uuid))
+
+    if not parsed:
+        print(f"{Color.YELLOW}No 'email=... uuid=...' lines found in the input.{Color.END}")
+        return
+
+    print(f"\n{Color.BOLD}Parsed {len(parsed)} meeting(s).{Color.END}")
+    confirm = input(
+        "Type 'DELETE' to confirm deleting these from Zoom after verifying Google Drive: "
+    ).strip()
+    delete_after = confirm == "DELETE"
+    if not delete_after:
+        print(f"{Color.YELLOW}Not deleting from Zoom; will only ensure files are on Drive.{Color.END}")
+
+    fully_present = deleted = failed = 0
+    for email, uuid in parsed:
+        print(f"\n{Color.BOLD}=== {email} — {uuid} ==={Color.END}")
+        data, err = get_meeting_recordings(uuid)
+        if err:
+            print(f"{Color.RED}  Could not fetch meeting from Zoom: {err}{Color.END}")
+            failed += 1
+            continue
+        # Preserve the original UUID for deletion (response may re-encode it).
+        data["uuid"] = uuid
+        all_present, was_deleted = archive_and_maybe_delete_recording(
+            drive_service, email, data, delete_after
+        )
+        if all_present:
+            fully_present += 1
+        else:
+            failed += 1
+        if was_deleted:
+            deleted += 1
+
+    save_drive_cache()
+
+    print(f"\n{Color.BOLD}=== Summary ==={Color.END}")
+    print(f"Meetings processed     : {len(parsed)}")
+    print(f"Fully present on Drive : {fully_present}")
+    if delete_after:
+        print(f"Deleted from Zoom      : {deleted}")
+    print(f"Incomplete / failed    : {failed}")
+
+
 def delete_recording_by_name():
     """ Ask for a Zoom recording name (topic), find matching recordings, and for
         each one that is already fully present in Google Drive, delete it from
@@ -1770,7 +2032,9 @@ def main():
     print("6. Check a user's recordings against Google Drive")
     print("7. Monthly cloud recording usage (cached vs. now)")
     print("8. Dry run archive (no download/upload; report volume + CSV)")
-    operation = input("Enter choice (1-8): ")
+    print("9. Report first N meetings missing from Google Drive")
+    print("10. Import missing meetings (from option 9) and archive/delete from Zoom")
+    operation = input("Enter choice (1-10): ")
 
     if operation == "2":
         load_access_token()
@@ -1805,6 +2069,16 @@ def main():
     if operation == "8":
         load_access_token()
         dry_run_archive()
+        return
+
+    if operation == "9":
+        load_access_token()
+        report_missing_meetings()
+        return
+
+    if operation == "10":
+        load_access_token()
+        import_and_archive_missing_meetings()
         return
 
     # Storage choice prompt
