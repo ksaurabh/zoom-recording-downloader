@@ -249,6 +249,31 @@ def setup_google_drive(auto=False):
 
 
 
+def http_request(method, url, retries=6, **kwargs):
+    """ requests.request with retry + backoff on transient network errors (dropped
+        TLS connections, timeouts, connection resets) and transient Zoom statuses
+        (429/5xx). Raises the last exception only after exhausting retries, so a
+        single network blip can't kill a long-running archive/monitor run. """
+    kwargs.setdefault("timeout", 60)
+    delay = 2
+    for attempt in range(1, retries + 1):
+        try:
+            response = requests.request(method, url, **kwargs)
+            if response.status_code in (429, 500, 502, 503, 504) and attempt < retries:
+                raise requests.exceptions.RequestException(f"HTTP {response.status_code}")
+            return response
+        except requests.exceptions.RequestException as e:
+            if attempt >= retries:
+                raise
+            endpoint = url.split("?", 1)[0]
+            print(
+                f"{Color.YELLOW}### Network error on {method} {endpoint} "
+                f"({type(e).__name__}: {e}); retry {attempt}/{retries} in {delay}s{Color.END}"
+            )
+            time.sleep(delay)
+            delay = min(delay * 2, 60)
+
+
 def load_access_token():
     """ OAuth function, thanks to https://github.com/freelimiter
     """
@@ -262,7 +287,7 @@ def load_access_token():
         "Content-Type": "application/x-www-form-urlencoded"
     }
 
-    response = json.loads(requests.request("POST", url, headers=headers).text)
+    response = json.loads(http_request("POST", url, headers=headers).text)
 
     global ACCESS_TOKEN
     global AUTHORIZATION_HEADER
@@ -280,7 +305,7 @@ def load_access_token():
 
 def get_users():
     """ loop through pages and return all users """
-    response = requests.get(url=API_ENDPOINT_USER_LIST, headers=AUTHORIZATION_HEADER)
+    response = http_request("GET", API_ENDPOINT_USER_LIST, headers=AUTHORIZATION_HEADER)
 
     if not response.ok:
         print(response)
@@ -298,7 +323,7 @@ def get_users():
 
     for page in range(1, total_pages):
         url = f"{API_ENDPOINT_USER_LIST}?page_number={str(page)}"
-        user_data = requests.get(url=url, headers=AUTHORIZATION_HEADER).json()
+        user_data = http_request("GET", url, headers=AUTHORIZATION_HEADER).json()
         users = ([
             (
                 user["email"],
@@ -402,8 +427,9 @@ def list_recordings(email, rec_start_date=None, rec_end_date=None):
             continue
 
         post_data = get_recordings(email, 300, start, end)
-        response = requests.get(
-            url=f"https://api.zoom.us/v2/users/{email}/recordings",
+        response = http_request(
+            "GET",
+            f"https://api.zoom.us/v2/users/{email}/recordings",
             headers=AUTHORIZATION_HEADER,
             params=post_data
         )
@@ -441,8 +467,9 @@ def list_recordings_for_day(email, day):
         return list(ZOOM_RECORDINGS_CACHE[cache_key])
 
     post_data = {"userId": email, "page_size": 300, "from": iso, "to": iso}
-    response = requests.get(
-        url=f"https://api.zoom.us/v2/users/{email}/recordings",
+    response = http_request(
+        "GET",
+        f"https://api.zoom.us/v2/users/{email}/recordings",
         headers=AUTHORIZATION_HEADER,
         params=post_data,
     )
@@ -469,7 +496,7 @@ def download_recording(download_url, email, filename, folder_name):
 
     os.makedirs(sanitized_download_dir, exist_ok=True)
 
-    response = requests.get(download_url, stream=True)
+    response = http_request("GET", download_url, stream=True)
 
     # total size in bytes.
     total_size = int(response.headers.get("content-length", 0))
@@ -1114,7 +1141,7 @@ def delete_cloud_recording(meeting_uuid):
         encoded = quote(meeting_uuid, safe="")
 
     url = f"https://api.zoom.us/v2/meetings/{encoded}/recordings"
-    response = requests.delete(url, headers=AUTHORIZATION_HEADER, params={"action": "trash"})
+    response = http_request("DELETE", url, headers=AUTHORIZATION_HEADER, params={"action": "trash"})
 
     if response.ok:
         return True, "moved to trash"
@@ -2289,7 +2316,13 @@ def monitor_archiving_by_date_range():
 
         # Fetch the remaining range fresh in one (chunked) query per user, then
         # scan the resulting per-day map — far fewer API calls than per-day lookups.
-        storage = _daily_storage_map(users, cur_start, end_day, show_progress=True)
+        # A pass that still fails after retries is skipped, not fatal.
+        try:
+            storage = _daily_storage_map(users, cur_start, end_day, show_progress=True)
+        except Exception as e:
+            print(f"{Color.RED}### Pass {iteration} failed ({e}); retrying after sleep.{Color.END}")
+            time.sleep(sleep_seconds)
+            continue
 
         # Scan forward from cur_start collecting up to 5 non-zero-storage days,
         # noting the first zero-storage day seen along the way.
