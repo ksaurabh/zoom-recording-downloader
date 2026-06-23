@@ -2163,6 +2163,106 @@ def export_daily_usage():
     print(f"Total: {g_meet} meeting(s), {g_files} file(s), {format_bytes(g_bytes)}")
 
 
+def _day_total_storage(users, day):
+    """ Total Zoom cloud storage (bytes) used across all users on a single day. """
+    total = 0
+    for email, user_id, first_name, last_name in users:
+        for rec in list_recordings_for_day(user_id, day):
+            total += int(rec.get("total_size", 0) or 0)
+    return total
+
+
+def monitor_archiving_by_date_range():
+    """ Option 15: monitor archiving over a date range. Repeatedly scans daily
+        cloud storage, collapsing the leading run of zero-storage (archived/empty)
+        days into a single range line, and shows only the next 5 days that still
+        have storage. Each pass advances past days that have emptied, so you can
+        watch archiving chew through the range. Always queries Zoom fresh (no cache)
+        so it reflects deletions in progress, sleeping a user-set interval between
+        passes (Ctrl-C to stop). """
+    global USE_ZOOM_CACHE, ZOOM_RECORDINGS_CACHE, SUPPRESS_CACHE_LOG
+    global RECORDING_START_DATE, RECORDING_END_DATE
+
+    print("\nThis monitors daily cloud storage over a range, 5 non-zero days at a time.")
+    # Always fresh so each pass reflects ongoing archiving.
+    ZOOM_RECORDINGS_CACHE = load_zoom_cache()
+    USE_ZOOM_CACHE = False
+    SUPPRESS_CACHE_LOG = True
+
+    last_range = load_last_daily_range()
+    if last_range:
+        RECORDING_START_DATE, RECORDING_END_DATE = last_range
+        prompt_date_range()
+    else:
+        input_date_range()
+    save_last_daily_range(RECORDING_START_DATE, RECORDING_END_DATE)
+
+    try:
+        sleep_seconds = int(input("Seconds to sleep between passes? [30]: ").strip() or "30")
+    except ValueError:
+        sleep_seconds = 30
+    sleep_seconds = max(1, sleep_seconds)
+
+    print(f"{Color.BOLD}Getting user accounts...{Color.END}")
+    users = get_users()
+
+    range_start = RECORDING_START_DATE.date()
+    end_day = RECORDING_END_DATE.date()
+    cur_start = range_start
+    NONZERO_LIMIT = 5
+
+    iteration = 0
+    while True:
+        iteration += 1
+
+        # Scan forward from cur_start collecting up to 5 non-zero-storage days.
+        first_nonzero = None
+        nonzero = []
+        day = cur_start
+        while day <= end_day and len(nonzero) < NONZERO_LIMIT:
+            b = _day_total_storage(users, day)
+            if b > 0:
+                if first_nonzero is None:
+                    first_nonzero = day
+                nonzero.append((day, b))
+            day += timedelta(days=1)
+
+        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        print(
+            f"\n{Color.BOLD}=== Monitor pass {iteration} ({stamp}) — "
+            f"{range_start} to {end_day} ==={Color.END}"
+        )
+
+        # Collapse the leading zero-storage prefix (from the original start).
+        prefix_end = (first_nonzero - timedelta(days=1)) if first_nonzero else end_day
+        if prefix_end >= range_start:
+            span = (prefix_end - range_start).days + 1
+            if span > 1:
+                print(
+                    f"  {Color.DARK_CYAN}{range_start} to {prefix_end}: "
+                    f"{format_bytes(0)}  ({span} days, no storage){Color.END}"
+                )
+            else:
+                print(f"  {Color.DARK_CYAN}{range_start}: {format_bytes(0)}{Color.END}")
+
+        for d, b in nonzero:
+            print(f"  {d}: {format_bytes(b)}")
+
+        if not nonzero:
+            print(
+                f"\n{Color.GREEN}No days with storage remain in the range — "
+                f"monitoring complete.{Color.END}"
+            )
+            break
+
+        # Auto-adjust: next pass starts at the first day that still has storage, so
+        # days that have emptied collapse out of the scan.
+        cur_start = first_nonzero
+
+        print(f"{Color.DARK_CYAN}Sleeping {sleep_seconds}s... (Ctrl-C to stop){Color.END}")
+        time.sleep(sleep_seconds)
+
+
 def delete_recording_by_name():
     """ Ask for a Zoom recording name (topic), find matching recordings, and for
         each one that is already fully present in Google Drive, delete it from
@@ -2425,11 +2525,12 @@ def main():
     print("12. Delete a recording from Zoom by name (if archived in Google Drive)")
     print("13. Clear the Zoom recordings cache")
     print("14. Export daily cloud recording usage to CSV")
-    operation = input("Enter choice (1-14): ")
+    print("15. Monitor archiving by date range")
+    operation = input("Enter choice (1-15): ")
 
     # Read-only reports suppress the per-lookup cache log lines so they don't flood;
     # archiving operations leave them on for visibility.
-    if operation in {"2", "3", "6", "7", "9", "11", "14"}:
+    if operation in {"2", "3", "6", "7", "9", "11", "14", "15"}:
         global SUPPRESS_CACHE_LOG
         SUPPRESS_CACHE_LOG = True
 
@@ -2495,6 +2596,11 @@ def main():
     if operation == "14":
         load_access_token()
         export_daily_usage()
+        return
+
+    if operation == "15":
+        load_access_token()
+        monitor_archiving_by_date_range()
         return
 
     # Storage choice prompt
