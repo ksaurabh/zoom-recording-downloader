@@ -1058,18 +1058,22 @@ def format_elapsed(seconds):
     return f"{secs}s"
 
 
-def _print_archive_progress(email, day, checked, found, missing):
+def _print_archive_progress(email, day, checked, found, missing, freed_bytes=None):
     """ Emit a one-line progress marker once a user's day has been fully archived,
         naming the user, the most recent date incorporated, how long the run has
-        been going, and the running totals of Zoom files checked, found already in
-        Google Drive, and missing from it. """
+        been going, the running totals of Zoom files checked, found already in
+        Google Drive, and missing from it, and (when deleting) the space freed in
+        Zoom by recordings that were trashed. """
     elapsed = ""
     if ARCHIVE_START_TS is not None:
         elapsed = f" [running {format_elapsed(time.time() - ARCHIVE_START_TS)}]"
+    saved = ""
+    if freed_bytes is not None:
+        saved = f", Zoom space freed {format_bytes(freed_bytes)}"
     print(
         f"{Color.GREEN}>>> Archive progress: completed {email} "
         f"through {day}{elapsed} | Zoom files checked {checked}, "
-        f"found in Drive {found}, missing {missing}{Color.END}"
+        f"found in Drive {found}, missing {missing}{saved}{Color.END}"
     )
 
 
@@ -1094,11 +1098,12 @@ def download_recordings_for_users(users, drive_service, delete_after=False, rech
 
     # Running totals across the whole run, shown on each progress line.
     checked = found = missing = 0
+    freed_bytes = 0  # Zoom storage freed by recordings moved to trash
 
     def process_recording(email, recording, index, total_count):
         """ Download/upload every file of one meeting and optionally trash it from
             Zoom once all files are safely in Drive. Updates the shared counters. """
-        nonlocal checked, found, missing
+        nonlocal checked, found, missing, freed_bytes
         try:
             meeting_uuid = recording["uuid"]
 
@@ -1200,7 +1205,12 @@ def download_recordings_for_users(users, drive_service, delete_after=False, rech
         if delete_after and all_uploaded and GDRIVE_ENABLED and drive_service:
             ok, message = delete_cloud_recording(meeting_uuid)
             if ok:
-                print(f"    > {Color.YELLOW}Removed from Zoom (moved to trash){Color.END}")
+                saved = int(recording.get("total_size", 0) or 0)
+                freed_bytes += saved
+                print(
+                    f"    > {Color.YELLOW}Removed from Zoom (moved to trash) — "
+                    f"freed {format_bytes(saved)}{Color.END}"
+                )
             else:
                 print(f"{Color.RED}### Failed to delete recording from Zoom - {message}{Color.END}")
 
@@ -1234,7 +1244,7 @@ def download_recordings_for_users(users, drive_service, delete_after=False, rech
                     process_recording(email, recording, index, total_count)
 
                 # Per-day checkpoint: progress line + persist the Drive cache.
-                _print_archive_progress(email, day, checked, found, missing)
+                _print_archive_progress(email, day, checked, found, missing, freed_bytes)
                 save_drive_cache()
 
             day += timedelta(days=1)
