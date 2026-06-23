@@ -2309,10 +2309,12 @@ def monitor_archiving_by_date_range():
         # Storage recouped = sum of drops from each day's first reading to its latest.
         recouped_gb = sum(first_reading[d] - latest_reading[d] for d in first_reading) / 1024 ** 3
         elapsed = time.time() - monitor_start
-        rate = (recouped_gb / (elapsed / 60)) if elapsed > 0 else 0.0
+        rate_min = (recouped_gb / (elapsed / 60)) if elapsed > 0 else 0.0
+        rate_hr = (recouped_gb / (elapsed / 3600)) if elapsed > 0 else 0.0
         print(
             f"  {Color.BOLD}Storage recouped: {recouped_gb:.2f} GB "
-            f"({rate:.2f} GB/min over {format_elapsed(elapsed)}){Color.END}"
+            f"({rate_min:.2f} GB/min, {rate_hr:.2f} GB/hour over "
+            f"{format_elapsed(elapsed)}){Color.END}"
         )
 
         if not nonzero:
