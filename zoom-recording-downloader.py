@@ -828,6 +828,16 @@ def _print_monthly_storage_matrix(month_keys, per_email, month_totals):
     total_cells = "".join(f"{format_bytes(month_totals.get(k, 0)):>{COL_W}}" for k in cols)
     print(f"{Color.BOLD}{'TOTAL':<{EMAIL_W}}{total_cells}{format_bytes(grand):>{COL_W}}{Color.END}")
 
+    # Simple month -> total storage table.
+    mhead = f"{'Month':<12}{'Storage':>14}"
+    print(f"\n{Color.BOLD}=== Storage by month ==={Color.END}")
+    print(f"{Color.BOLD}{mhead}{Color.END}")
+    print("-" * len(mhead))
+    for k in cols:
+        print(f"{k:<12}{format_bytes(month_totals.get(k, 0)):>14}")
+    print("-" * len(mhead))
+    print(f"{Color.BOLD}{'TOTAL':<12}{format_bytes(grand):>14}{Color.END}")
+
 
 def monthly_usage_cached_vs_now():
     """ For each month (starting with the current one, going back), compare the
