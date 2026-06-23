@@ -2243,9 +2243,11 @@ def monitor_archiving_by_date_range():
     while True:
         iteration += 1
 
-        # Scan forward from cur_start collecting up to 5 non-zero-storage days.
+        # Scan forward from cur_start collecting up to 5 non-zero-storage days,
+        # noting the first zero-storage day seen along the way.
         first_nonzero = None
         nonzero = []
+        zero_day_seen = None
         day = cur_start
         while day <= end_day and len(nonzero) < NONZERO_LIMIT:
             b = _day_total_storage(users, day)
@@ -2253,7 +2255,14 @@ def monitor_archiving_by_date_range():
                 if first_nonzero is None:
                     first_nonzero = day
                 nonzero.append((day, b))
+            elif zero_day_seen is None:
+                zero_day_seen = day
             day += timedelta(days=1)
+
+        # If no zero day fell inside the window, peek one day past it so the pass
+        # can still surface a zero-storage day when one exists right after.
+        if zero_day_seen is None and day <= end_day and _day_total_storage(users, day) == 0:
+            zero_day_seen = day
 
         stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
         print(
@@ -2263,7 +2272,8 @@ def monitor_archiving_by_date_range():
 
         # Collapse the leading zero-storage prefix (from the original start).
         prefix_end = (first_nonzero - timedelta(days=1)) if first_nonzero else end_day
-        if prefix_end >= range_start:
+        leading_printed = prefix_end >= range_start
+        if leading_printed:
             span = (prefix_end - range_start).days + 1
             if span > 1:
                 print(
@@ -2275,6 +2285,11 @@ def monitor_archiving_by_date_range():
 
         for d, b in nonzero:
             print(f"  {d}: {format_bytes(b)}")
+
+        # Always show at least one zero-storage day if one exists and none was
+        # already shown via the collapsed leading prefix.
+        if not leading_printed and zero_day_seen is not None:
+            print(f"  {Color.DARK_CYAN}{zero_day_seen}: {format_bytes(0)}{Color.END}")
 
         if not nonzero:
             print(
