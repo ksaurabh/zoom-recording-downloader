@@ -175,18 +175,20 @@ def _log_started_at(path):
     return None
 
 
-def setup_logging():
-    """ Tee every stdout/stderr line to a per-process log file so all output is
+def setup_logging(label):
+    """ Tee every stdout/stderr line to a per-operation log file so all output is
         captured and concurrent runs (e.g. an archive plus the monitor) never share
-        or interleave one file. The file is LOG_FILE with the PID inserted, e.g.
-        zoom-downloader-12345.log. If it already exists and was started more than
-        LOG_MAX_AGE_HOURS ago, it is rotated to a timestamped file first. """
+        or interleave one file. The file is LOG_FILE with the chosen option inserted,
+        e.g. zoom-downloader-15.log for option 15 (or -auto/-dry-run for those CLI
+        modes). If it already exists and was started more than LOG_MAX_AGE_HOURS ago,
+        it is rotated to a timestamped file first. """
     global ORIGINAL_STDOUT, ORIGINAL_STDERR
     now = datetime.now(timezone.utc)
     rotated_to = None
 
+    safe_label = regex.sub(r"[^A-Za-z0-9_-]", "", str(label)) or "op"
     base, ext = os.path.splitext(LOG_FILE)
-    log_path = f"{base}-{os.getpid()}{ext}"
+    log_path = f"{base}-{safe_label}{ext}"
 
     if os.path.exists(log_path):
         started = _log_started_at(log_path)
@@ -194,7 +196,7 @@ def setup_logging():
             # No marker (older log) — fall back to the file's modification time.
             started = datetime.fromtimestamp(os.path.getmtime(log_path), tz=timezone.utc)
         if (now - started).total_seconds() >= LOG_MAX_AGE_HOURS * 3600:
-            rotated_to = f"{base}-{os.getpid()}-{started.strftime('%Y%m%d-%H%M%S')}{ext}"
+            rotated_to = f"{base}-{safe_label}-{started.strftime('%Y%m%d-%H%M%S')}{ext}"
             try:
                 os.replace(log_path, rotated_to)
             except OSError:
@@ -2598,9 +2600,6 @@ def main():
     # clear the screen buffer
     os.system('cls' if os.name == 'nt' else 'clear')
 
-    # Capture all output to a rotating log file
-    setup_logging()
-
     # show the logo
     print(f"""
         {Color.DARK_CYAN}
@@ -2637,12 +2636,14 @@ def main():
 
     # Non-interactive dry run: simulate the archive (option 8) and write the CSV
     if "--dry-run" in system.argv:
+        setup_logging("dry-run")
         load_access_token()
         dry_run_archive(interactive=False)
         return
 
     # Non-interactive auto mode: run option 4 (archive) using the saved plan
     if "--auto" in system.argv:
+        setup_logging("auto")
         load_access_token()
         run_archive(auto=True)
         return
@@ -2665,6 +2666,9 @@ def main():
     print("14. Export daily cloud recording usage to CSV")
     print("15. Monitor archiving by date range")
     operation = input("Enter choice (1-15): ")
+
+    # Capture all output to a per-operation log file (named by the chosen option).
+    setup_logging(operation)
 
     # Read-only reports suppress the per-lookup cache log lines so they don't flood;
     # archiving operations leave them on for visibility.
