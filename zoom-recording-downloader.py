@@ -426,8 +426,8 @@ def list_recordings(email, rec_start_date=None, rec_end_date=None):
         if USE_ZOOM_CACHE and cache_key in ZOOM_RECORDINGS_CACHE:
             if not SUPPRESS_CACHE_LOG:
                 print(
-                    f"{Color.DARK_CYAN}[zoom cache] hit — {email} "
-                    f"{start.date()}..{end.date()} (no Zoom API call){Color.END}"
+                    f"[zoom cache] hit — {email} "
+                    f"{start.date()}..{end.date()} (no Zoom API call)"
                 )
             recordings.extend(ZOOM_RECORDINGS_CACHE[cache_key])
             continue
@@ -448,8 +448,8 @@ def list_recordings(email, rec_start_date=None, rec_end_date=None):
             if not SUPPRESS_CACHE_LOG:
                 reason = "miss" if USE_ZOOM_CACHE else "disabled"
                 print(
-                    f"{Color.DARK_CYAN}[zoom cache] {reason} — {email} "
-                    f"{start.date()}..{end.date()}: called Zoom API, cache updated{Color.END}"
+                    f"[zoom cache] {reason} — {email} "
+                    f"{start.date()}..{end.date()}: called Zoom API, cache updated"
                 )
         elif not SUPPRESS_CACHE_LOG:
             print(f"No 'meetings' key found in response for {email} from {start} to {end}")
@@ -469,7 +469,7 @@ def list_recordings_for_day(email, day):
     cache_key = f"{email}|{iso}|{iso}"
     if USE_ZOOM_CACHE and cache_key in ZOOM_RECORDINGS_CACHE:
         if not SUPPRESS_CACHE_LOG:
-            print(f"{Color.DARK_CYAN}[zoom cache] hit — {email} {iso} (no Zoom API call){Color.END}")
+            print(f"[zoom cache] hit — {email} {iso} (no Zoom API call)")
         return list(ZOOM_RECORDINGS_CACHE[cache_key])
 
     post_data = {"userId": email, "page_size": 300, "from": iso, "to": iso}
@@ -486,8 +486,8 @@ def list_recordings_for_day(email, day):
         save_zoom_cache()
         if not SUPPRESS_CACHE_LOG:
             reason = "miss" if USE_ZOOM_CACHE else "disabled"
-            print(f"{Color.DARK_CYAN}[zoom cache] {reason} — {email} {iso}: "
-                  f"called Zoom API, cache updated{Color.END}")
+            print(f"[zoom cache] {reason} — {email} {iso}: "
+                  f"called Zoom API, cache updated")
         return meetings
 
     if not SUPPRESS_CACHE_LOG:
@@ -733,8 +733,8 @@ def drive_file_exists(drive_service, folder, filename):
     if USE_DRIVE_CACHE and key in DRIVE_LOOKUP_CACHE:
         if not SUPPRESS_CACHE_LOG:
             print(
-                f"{Color.DARK_CYAN}[drive cache] hit — {filename} "
-                f"(no Drive API call){Color.END}"
+                f"[drive cache] hit — {filename} "
+                f"(no Drive API call)"
             )
         return DRIVE_LOOKUP_CACHE[key]
     exists = drive_service.file_exists(folder, filename)
@@ -742,8 +742,8 @@ def drive_file_exists(drive_service, folder, filename):
     if not SUPPRESS_CACHE_LOG:
         reason = "miss" if USE_DRIVE_CACHE else "disabled"
         print(
-            f"{Color.DARK_CYAN}[drive cache] {reason} — {filename}: "
-            f"called Drive API, cache updated{Color.END}"
+            f"[drive cache] {reason} — {filename}: "
+            f"called Drive API, cache updated"
         )
     return exists
 
@@ -755,8 +755,8 @@ def note_drive_upload(folder, filename):
     DRIVE_LOOKUP_CACHE[f"{folder}|{filename}"] = True
     save_drive_cache()
     print(
-        f"{Color.DARK_CYAN}[drive cache] updated — {filename} "
-        f"marked present after upload{Color.END}"
+        f"[drive cache] updated — {filename} "
+        f"marked present after upload"
     )
 
 
