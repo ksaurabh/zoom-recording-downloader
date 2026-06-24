@@ -783,18 +783,19 @@ def month_range(year, month):
     return start, end
 
 
-def get_month_usage(users_getter, year, month, cache, quiet=False):
+def get_month_usage(users_getter, year, month, cache, quiet=False, use_cache=True):
     """ Return (result, from_cache) for a calendar month's usage.
         Completed months are served from / written to the cache; the current
         (in-progress) month is always recomputed live since it keeps changing.
-        users_getter is called only on a cache miss, so cached-only runs avoid
-        fetching the user list.
+        When use_cache is False, completed months are recomputed fresh too (and the
+        cache is refreshed). users_getter is called only on a cache miss, so
+        cached-only runs avoid fetching the user list.
     """
     key = f"{year:04d}-{month:02d}"
     current_key = datetime.now(timezone.utc).strftime("%Y-%m")
     is_current = (key == current_key)
 
-    if key in cache and not is_current:
+    if use_cache and key in cache and not is_current:
         return cache[key], True
 
     start, end = month_range(year, month)
@@ -818,6 +819,10 @@ def monthly_usage_report():
         months = 1
     months = max(1, months)
 
+    use_cache = input(
+        "Use cached monthly usage when available? (y/n): "
+    ).strip().lower() == "y"
+
     cache = load_usage_cache()
     users_getter = _lazy_users()
 
@@ -828,7 +833,7 @@ def monthly_usage_report():
     year, month = today.year, today.month
     for _ in range(months):
         key = f"{year:04d}-{month:02d}"
-        result, from_cache = get_month_usage(users_getter, year, month, cache)
+        result, from_cache = get_month_usage(users_getter, year, month, cache, use_cache=use_cache)
         source = "from cache" if from_cache else (
             "current month, live" if key == today.strftime("%Y-%m") else "querying Zoom"
         )
