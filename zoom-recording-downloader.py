@@ -176,28 +176,32 @@ def _log_started_at(path):
 
 
 def setup_logging():
-    """ Tee every stdout/stderr line to LOG_FILE so all output is captured. If the
-        existing log was started more than LOG_MAX_AGE_HOURS ago, it is first
-        rotated to a timestamped file and a fresh log is begun. """
+    """ Tee every stdout/stderr line to a per-process log file so all output is
+        captured and concurrent runs (e.g. an archive plus the monitor) never share
+        or interleave one file. The file is LOG_FILE with the PID inserted, e.g.
+        zoom-downloader-12345.log. If it already exists and was started more than
+        LOG_MAX_AGE_HOURS ago, it is rotated to a timestamped file first. """
     global ORIGINAL_STDOUT, ORIGINAL_STDERR
     now = datetime.now(timezone.utc)
     rotated_to = None
 
-    if os.path.exists(LOG_FILE):
-        started = _log_started_at(LOG_FILE)
+    base, ext = os.path.splitext(LOG_FILE)
+    log_path = f"{base}-{os.getpid()}{ext}"
+
+    if os.path.exists(log_path):
+        started = _log_started_at(log_path)
         if started is None:
             # No marker (older log) — fall back to the file's modification time.
-            started = datetime.fromtimestamp(os.path.getmtime(LOG_FILE), tz=timezone.utc)
+            started = datetime.fromtimestamp(os.path.getmtime(log_path), tz=timezone.utc)
         if (now - started).total_seconds() >= LOG_MAX_AGE_HOURS * 3600:
-            base, ext = os.path.splitext(LOG_FILE)
-            rotated_to = f"{base}-{started.strftime('%Y%m%d-%H%M%S')}{ext}"
+            rotated_to = f"{base}-{os.getpid()}-{started.strftime('%Y%m%d-%H%M%S')}{ext}"
             try:
-                os.replace(LOG_FILE, rotated_to)
+                os.replace(log_path, rotated_to)
             except OSError:
                 rotated_to = None
 
-    new_log = not os.path.exists(LOG_FILE)
-    log_fd = open(LOG_FILE, "a", encoding="utf-8", buffering=1)
+    new_log = not os.path.exists(log_path)
+    log_fd = open(log_path, "a", encoding="utf-8", buffering=1)
     if new_log:
         log_fd.write(f"# log started: {now.isoformat()}\n")
 
@@ -211,7 +215,7 @@ def setup_logging():
             f"{Color.DARK_CYAN}Previous log was older than {LOG_MAX_AGE_HOURS}h; "
             f"rotated to {rotated_to}{Color.END}"
         )
-    print(f"{Color.DARK_CYAN}Logging all output to {LOG_FILE}{Color.END}")
+    print(f"{Color.DARK_CYAN}Logging all output to {log_path}{Color.END}")
 
 
 def setup_google_drive(auto=False):
