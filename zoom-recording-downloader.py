@@ -255,16 +255,33 @@ def setup_google_drive(auto=False):
 
 
 
-def http_request(method, url, retries=6, **kwargs):
+def http_request(method, url, retries=6, refresh_on_401=True, **kwargs):
     """ requests.request with retry + backoff on transient network errors (dropped
         TLS connections, timeouts, connection resets) and transient Zoom statuses
-        (429/5xx). Raises the last exception only after exhausting retries, so a
-        single network blip can't kill a long-running archive/monitor run. """
+        (429/5xx). On an HTTP 401 from Zoom it refreshes the access token once and
+        retries (server-to-server tokens expire after ~1 hour, which would otherwise
+        kill a long archive/monitor run). Raises the last exception only after
+        exhausting retries. """
     kwargs.setdefault("timeout", 60)
     delay = 2
+    refreshed = False
     for attempt in range(1, retries + 1):
         try:
             response = requests.request(method, url, **kwargs)
+
+            if (response.status_code == 401 and refresh_on_401 and not refreshed
+                    and "zoom" in url.lower()):
+                print(f"{Color.YELLOW}### Zoom access token expired; refreshing and retrying...{Color.END}")
+                load_access_token()
+                refreshed = True
+                # Header-based auth (recordings list, delete): swap in the new header.
+                if kwargs.get("headers") and "Authorization" in kwargs["headers"]:
+                    kwargs["headers"] = AUTHORIZATION_HEADER
+                # Download links carry the token in the query string: rewrite it.
+                if "access_token=" in url:
+                    url = regex.sub(r"access_token=[^&]+", f"access_token={ACCESS_TOKEN}", url)
+                continue
+
             if response.status_code in (429, 500, 502, 503, 504) and attempt < retries:
                 raise requests.exceptions.RequestException(f"HTTP {response.status_code}")
             return response
@@ -293,7 +310,7 @@ def load_access_token():
         "Content-Type": "application/x-www-form-urlencoded"
     }
 
-    response = json.loads(http_request("POST", url, headers=headers).text)
+    response = json.loads(http_request("POST", url, headers=headers, refresh_on_401=False).text)
 
     global ACCESS_TOKEN
     global AUTHORIZATION_HEADER
