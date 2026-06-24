@@ -445,7 +445,7 @@ def list_recordings(email, rec_start_date=None, rec_end_date=None):
                     f"{Color.DARK_CYAN}[zoom cache] {reason} — {email} "
                     f"{start.date()}..{end.date()}: called Zoom API, cache updated{Color.END}"
                 )
-        else:
+        elif not SUPPRESS_CACHE_LOG:
             print(f"No 'meetings' key found in response for {email} from {start} to {end}")
 
     if fetched_new:
@@ -484,7 +484,8 @@ def list_recordings_for_day(email, day):
                   f"called Zoom API, cache updated{Color.END}")
         return meetings
 
-    print(f"No 'meetings' key found in response for {email} on {iso}")
+    if not SUPPRESS_CACHE_LOG:
+        print(f"No 'meetings' key found in response for {email} on {iso}")
     return []
 
 
